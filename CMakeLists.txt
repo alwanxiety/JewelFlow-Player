@@ -63,7 +63,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-add_executable(JewelPlayer
+add_executable(JewelPlayer WIN32
         src/AudioEngine.cpp
         src/Metadata.cpp
         src/Renderer.cpp
