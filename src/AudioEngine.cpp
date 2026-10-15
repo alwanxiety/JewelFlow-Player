@@ -19,7 +19,6 @@ bool AudioEngine::init() {
     if (m_engine) return true;
     m_engine = new ma_engine();
     ma_engine_config config = ma_engine_config_init();
-    // Увеличиваем период аудио-буфера до 20 мс для снижения числа прерываний и нагрузки на CPU
     config.periodSizeInMilliseconds = 20;
     if (ma_engine_init(&config, m_engine) != MA_SUCCESS) {
         delete m_engine;

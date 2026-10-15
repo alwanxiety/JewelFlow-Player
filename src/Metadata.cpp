@@ -149,8 +149,6 @@ static GLuint uploadTextureFromMemory(const unsigned char* data, int size, glm::
         }
     }
 
-    // Если обложка слишком огромная (> 512px), быстро уменьшаем её в 2–4 раза перед отправкой в GPU,
-    // чтобы не тратить время на генерацию гигантских мипмапов в Debug-режиме
     const unsigned char* uploadPtr = img;
     std::vector<unsigned char> downscaled;
     int upW = w, upH = h;
@@ -407,7 +405,6 @@ static GLuint parseAudioTagsAndCover(const fs::path& path, TrackData& track) {
     return 0;
 }
 
-// Сверхбыстрая генерация плашки обложки (512x168) на чистой целочисленной арифметике (выполняется за ~1 мс даже в Debug)
 static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::wstring& title, const glm::vec3& accent) {
     const int W = 512, H = 168;
     BITMAPINFO bmi = {0};
@@ -468,7 +465,6 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
 
     for (int y = 0; y < H; ++y) {
         int srcY = H - 1 - y;
-        // Быстрая целочисленная аппроксимация градиента прозрачности (0..240)
         int gradA = (srcY * 242) / (H - 1);
         uint32_t textTintR = (srcY >= 86) ? 215 : 255;
         uint32_t textTintG = (srcY >= 86) ? 222 : 255;
@@ -485,7 +481,7 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
                 dstRow[x * 4 + 2] = accB;
                 dstRow[x * 4 + 3] = 255;
             } else {
-                uint32_t tCov = srcRow[x * 4 + 1]; // Зелёный канал несёт основную яркость ClearType
+                uint32_t tCov = srcRow[x * 4 + 1];
                 uint32_t invCov = 255 - tCov;
                 dstRow[x * 4 + 0] = static_cast<unsigned char>((10 * invCov + textTintR * tCov) >> 8);
                 dstRow[x * 4 + 1] = static_cast<unsigned char>((12 * invCov + textTintG * tCov) >> 8);
@@ -514,7 +510,6 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
     return tex;
 }
 
-// Сверхбыстрая генерация дефолтной обложки (256x256) без тяжёлых тригонометрических вызовов
 static GLuint createFallbackCover(const glm::vec3& accent) {
     const int S = 256;
     std::vector<unsigned char> img(S * S * 4);

@@ -74,9 +74,6 @@ static std::mt19937& getRng() {
     return rng;
 }
 
-// Кастомная оконная процедура: убирает стандартную белую шапку через WM_NCCALCSIZE,
-// но сохраняет стили WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
-// благодаря чему работают ВСЕ нативные плавные анимации Windows 11 (сворачивание, разворачивание, полный экран, Aero Snap)!
 static LRESULT CALLBACK CustomBorderlessWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_NCCALCSIZE && wParam == TRUE) {
         NCCALCSIZE_PARAMS* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
@@ -100,7 +97,6 @@ static void applyWindows11FrameStyle(HWND hwnd) {
         SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(CustomBorderlessWndProc))
     );
 
-    // Включаем нативные флаги окна, необходимые DWM для плавных анимаций сворачивания и разворачивания
     LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     style |= (WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
     SetWindowLongPtrW(hwnd, GWL_STYLE, style);
@@ -108,13 +104,13 @@ static void applyWindows11FrameStyle(HWND hwnd) {
     BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
 
-    DWORD cornerPref = 2; // DWMWCP_ROUND
+    DWORD cornerPref = 2;
     DwmSetWindowAttribute(hwnd, 33, &cornerPref, sizeof(cornerPref));
 
     COLORREF borderCol = RGB(36, 40, 52);
     DwmSetWindowAttribute(hwnd, 34, &borderCol, sizeof(borderCol));
 
-    BOOL transitionsDisabled = FALSE; // Гарантируем, что DWM-анимации включены для окна
+    BOOL transitionsDisabled = FALSE;
     DwmSetWindowAttribute(hwnd, 3, &transitionsDisabled, sizeof(transitionsDisabled));
 
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
@@ -824,7 +820,6 @@ int main() {
             }
         }
 
-        // Скролл полки мышью и плавный автоскролл у краёв
         if (!io.WantCaptureMouse && !g_visibleIndices.empty() && !g_roulette.active) {
             if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
                 g_targetScroll -= io.MouseDelta.x * 0.0045f;
@@ -976,7 +971,6 @@ int main() {
             }
         }
 
-        // ------------------ 1. ВСПЛЫВАЮЩЕЕ ОКНО ПРЯМО ПОД БОКСОМ + КУРСОР РУЛЕТКИ ------------------
         int bestHoverSlot = -1;
         float bestHoverWeight = 0.04f;
         for (size_t slot = 0; slot < g_visibleIndices.size(); ++slot) {
@@ -1047,13 +1041,11 @@ int main() {
             ImGui::PopStyleColor(2);
         }
 
-        // ------------------ 2. ВЕРХНЯЯ ОБЛАСТЬ: ЦЕНТРАЛЬНЫЙ ПОИСК + СТИЛИЗОВАННЫЕ КНОПКИ ОКНА СПРАВА ------------------
         const float topBarY = 16.0f;
         const float topBarH = 46.0f;
         const float itemH = 30.0f;
         const float itemY = (topBarH - itemH) * 0.5f;
 
-        // 2.1. Центральная панель импорта и поиска
         const float topBarW = 630.0f;
         ImGui::SetNextWindowPos(ImVec2((w - topBarW) * 0.5f, topBarY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(topBarW, topBarH), ImGuiCond_Always);
@@ -1120,7 +1112,6 @@ int main() {
         ImGui::PopStyleVar();
         ImGui::PopStyleColor(8);
 
-        // 2.2. Правая капсула управления окном (вызывает нативные системные команды SC_MINIMIZE / SC_MAXIMIZE / SC_RESTORE с плавными анимациями Windows!)
         const float winCtrlW = 126.0f;
         ImGui::SetNextWindowPos(ImVec2(static_cast<float>(w) - winCtrlW - 18.0f, topBarY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(winCtrlW, topBarH), ImGuiCond_Always);
@@ -1154,7 +1145,6 @@ int main() {
         ImGui::End();
         ImGui::PopStyleColor(2);
 
-        // Нативное перетаскивание окна за свободную верхнюю область (и двойной клик с нативной анимацией SC_MAXIMIZE / SC_RESTORE)
         if (!io.WantCaptureMouse && mouseY >= 0.0 && mouseY < 72.0) {
             if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 PostMessageW(hwnd, WM_SYSCOMMAND, IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE, 0);
@@ -1164,7 +1154,6 @@ int main() {
             }
         }
 
-        // Подсказка на пустом экране
         if (g_playlist.empty() && g_pendingLoadQueue.empty()) {
             float hintW = 440.0f, hintH = 88.0f;
             ImGui::SetNextWindowPos(ImVec2((w - hintW) * 0.5f, (h - hintH) * 0.45f), ImGuiCond_Always);
@@ -1189,7 +1178,6 @@ int main() {
             ImGui::PopStyleColor(2);
         }
 
-        // ================== 3. НИЖНИЙ БАР ПЛЕЕРА ==================
         if (hudAlpha > 0.01f && !g_playlist.empty()) {
             const float dockW = std::min(860.0f, static_cast<float>(w) - 32.0f);
             const float dockH = 84.0f;
@@ -1406,7 +1394,6 @@ int main() {
             ImGui::PopStyleColor(3);
         }
 
-        // ------------------ 4. КЛИКИ ПО БОКСАМ И КОНТЕКСТНОЕ МЕНЮ ПО ПКМ ------------------
         if (!io.WantCaptureMouse && !g_roulette.active && mouseY >= 72.0) {
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hoverIndex != -1 && !g_playlist.empty()) {
                 int targetIdx = std::clamp(hoverIndex, 0, static_cast<int>(g_playlist.size()) - 1);

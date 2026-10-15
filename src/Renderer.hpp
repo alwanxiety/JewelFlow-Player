@@ -45,7 +45,6 @@ private:
     GLuint m_caseShader = 0;
     GLuint m_shadowShader = 0;
 
-    // Закэшированные Uniform-локации (ноль строковых поисков в кадре)
     GLint m_bgLocAccent = -1;
     GLint m_bgLocTime = -1;
 

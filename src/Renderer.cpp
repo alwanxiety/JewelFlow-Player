@@ -411,7 +411,6 @@ glm::vec2 Renderer::getBoxBottomScreenPos(int slotIndex, float hoverWeight, floa
     float xPos = kStartX + (static_cast<float>(slotIndex) * kSpacing) - shelfScroll;
     float curY = hoverWeight * 0.22f;
 
-    // Аналитическая точка (0.32, -0.72, 0.04), повернутая на +45 градусов вокруг Y
     glm::vec3 worldPt(
         xPos + (0.32f * kCos45 + 0.04f * kCos45),
         curY - 0.72f,
@@ -435,7 +434,6 @@ glm::vec2 Renderer::getBoxTopScreenPos(int slotIndex, float hoverWeight, float s
     return glm::vec2(screenPt.x, static_cast<float>(m_height) - screenPt.y);
 }
 
-// Сверхбыстрый 3D Raycast без glm::inverse(mat4) в цикле — аналитический поворот луча на -45 градусов вокруг Y
 int Renderer::pickTrack(double mouseX,
                         double mouseY,
                         const std::vector<int>& visibleIndices,
@@ -451,7 +449,6 @@ int Renderer::pickTrack(double mouseX,
     glm::vec3 rayFar  = glm::unProject(glm::vec3(winX, winY, 1.0f), m_view, m_proj, viewport);
     glm::vec3 rayDir  = glm::normalize(rayFar - rayNear);
 
-    // Направление луча в локальной системе координат бокса одинаково для всех боксов на полке!
     const float localDirX = (rayDir.x - rayDir.z) * kCos45;
     const float localDirY = rayDir.y;
     const float localDirZ = (rayDir.x + rayDir.z) * kCos45;
@@ -526,7 +523,6 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
 
     glEnable(GL_MULTISAMPLE);
 
-    // 0. Отрисовка студийного фона
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glUseProgram(m_bgShader);
@@ -540,7 +536,6 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
 
     if (visibleIndices.empty()) return;
 
-    // 1. Двухслойные тени под видимыми кейсами
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
@@ -595,21 +590,17 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
 
         glBindVertexArray(m_boxVAO);
 
-        // 1) Боковая грань (процедурный минималистичный корешок без текста)
         glUniform1i(m_caseLocType, 1);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)(6 * sizeof(uint32_t)));
 
-        // 2) Задний лоток
         glUniform1i(m_caseLocType, 0);
         glUniform3f(m_caseLocBaseColor, 0.15f, 0.17f, 0.22f);
         glDrawElements(GL_TRIANGLES, 24, GL_UNSIGNED_INT, (void*)(12 * sizeof(uint32_t)));
 
-        // 3) Лицевая обложка
         glUniform1i(m_caseLocType, 2);
         glBindTexture(GL_TEXTURE_2D, playlist[trackIdx].coverTex);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)(0 * sizeof(uint32_t)));
 
-        // 4) Плашка с названием и исполнителем внизу обложки
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glUniform1i(m_caseLocType, 4);
@@ -617,7 +608,6 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
         glBindVertexArray(m_badgeVAO);
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
-        // 5) Акриловый глянец поверх закрытого бокса
         glDepthMask(GL_FALSE);
         glUniform1i(m_caseLocType, 3);
         glm::mat4 glassM = glm::translate(modelMat, glm::vec3(0.0f, 0.0f, 0.007f));
@@ -630,7 +620,6 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
 
     int flyingSlot = -1;
 
-    // 2. Рендер видимых CD-боксов на полке
     for (size_t slot = 0; slot < visibleIndices.size(); ++slot) {
         int realIdx = visibleIndices[slot];
         if (realIdx == selectedIndex) {
@@ -655,7 +644,6 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
         drawClosedCase(realIdx, baseM, 1.0f, highlight);
     }
 
-    // 3. Анимация плавного перетекания выбранного бокса в нижний бар плеера
     if (selectedIndex >= 0 && selectedIndex < static_cast<int>(playlist.size()) &&
         discFlightProgress > 0.001f && discFlightProgress < 0.995f) {
         float t = discFlightProgress;

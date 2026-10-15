@@ -11,7 +11,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# 1. GLFW
 FetchContent_Declare(
         glfw
         URL https://github.com/glfw/glfw/archive/refs/tags/3.4.zip
@@ -22,7 +21,6 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
-# 2. GLM
 FetchContent_Declare(
         glm
         URL https://github.com/g-truc/glm/archive/refs/tags/1.0.1.zip
@@ -31,7 +29,6 @@ FetchContent_Declare(
 set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
 
-# 3. miniaudio
 FetchContent_Declare(
         miniaudio
         URL https://github.com/mackron/miniaudio/archive/refs/heads/master.zip
@@ -39,7 +36,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(miniaudio)
 
-# 4. GLAD
 FetchContent_Declare(
         glad
         URL https://github.com/libigl/libigl-glad/archive/refs/heads/master.zip
@@ -47,7 +43,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glad)
 
-# 5. Dear ImGui
 FetchContent_Declare(
         imgui
         URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.4.zip
@@ -55,7 +50,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-# 6. stb (stb_image)
 FetchContent_Declare(
         stb
         URL https://github.com/nothings/stb/archive/refs/heads/master.zip
@@ -98,3 +92,7 @@ target_link_libraries(JewelPlayer PRIVATE
         dwmapi
         winmm
 )
+
+if(MSVC)
+    target_link_options(JewelPlayer PRIVATE "/ENTRY:mainCRTStartup")
+endif()
