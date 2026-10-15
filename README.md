@@ -7,10 +7,10 @@
 </p>
 
 <div align="center">
-<img src="https://img.shields.io/badge/Platform-Windows-blue?style=for-the-badge&logo=windows&logoColor=white" alt="Windows">
-<img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white" alt="C++20">
-<img src="https://img.shields.io/badge/OpenGL-3.3%2B-5586A4?style=for-the-badge&logo=opengl&logoColor=white" alt="OpenGL">
-<img src="https://img.shields.io/badge/Dear_ImGui-UI-1D1D1D?style=for-the-badge&logo=cplusplus&logoColor=white" alt="Dear ImGui">
+<img src="https://img.shields.io/badge/PLATFORM-WINDOWS-0078D6?style=flat-square" alt="Platform">
+<img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat-square&logo=c%2B%2B&logoColor=white" alt="C++">
+<img src="https://img.shields.io/badge/OPENGL-3.3%2B-5586A4?style=flat-square&logo=opengl&logoColor=white" alt="OpenGL">
+<img src="https://img.shields.io/badge/UI-DEAR%20IMGUI-1D1D1D?style=flat-square" alt="Dear ImGui">
 <img src="https://img.shields.io/badge/AUDIO-MINIAUDIO-orange?style=flat-square" alt="miniaudio">
 </div>
 
