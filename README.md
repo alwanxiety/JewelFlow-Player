@@ -11,6 +11,7 @@
 <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white" alt="C++20">
 <img src="https://img.shields.io/badge/OpenGL-3.3%2B-5586A4?style=for-the-badge&logo=opengl&logoColor=white" alt="OpenGL">
 <img src="https://img.shields.io/badge/Dear_ImGui-UI-1D1D1D?style=for-the-badge&logo=cplusplus&logoColor=white" alt="Dear ImGui">
+<img src="https://img.shields.io/badge/AUDIO-MINIAUDIO-orange?style=flat-square" alt="miniaudio">
 </div>
 
 ## ✨ Основные фичи
