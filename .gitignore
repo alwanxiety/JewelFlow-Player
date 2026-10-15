@@ -1,0 +1,12 @@
+.idea/
+
+cmake-build-*/
+build/
+
+*.rar
+*.zip
+*.7z
+*.exe
+
+.DS_Store
+Thumbs.db
