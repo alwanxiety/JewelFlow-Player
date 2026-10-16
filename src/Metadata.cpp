@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "Metadata.hpp"
+#include "CoverFetcher.hpp"
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -88,7 +89,7 @@ void MetadataParser::cleanup(TrackData& track) {
     }
 }
 
-static void applySharpTextureParams(float lodBias = -0.50f) {
+static void applySharpTextureParams(float lodBias = -0.45f) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -105,7 +106,7 @@ static void applySharpTextureParams(float lodBias = -0.50f) {
     }
 }
 
-static GLuint uploadTextureFromMemory(const unsigned char* data, int size, glm::vec3* outAccent) {
+GLuint MetadataParser::uploadTextureFromMemory(const unsigned char* data, int size, glm::vec3* outAccent) {
     if (!data || size <= 0) return 0;
     stbi_set_flip_vertically_on_load(true);
     int w = 0, h = 0, ch = 0;
@@ -152,17 +153,38 @@ static GLuint uploadTextureFromMemory(const unsigned char* data, int size, glm::
     const unsigned char* uploadPtr = img;
     std::vector<unsigned char> downscaled;
     int upW = w, upH = h;
-    if (w > 600 || h > 600) {
-        upW = std::min(512, w);
-        upH = std::min(512, h);
+    // Сохраняем обложки в высоком разрешении (до 1400x1400).
+    // Для сверхбольших изображений применяем качественный билинейный даунскейлинг без лесенок
+    if (w > 1400 || h > 1400) {
+        upW = std::min(1400, w);
+        upH = std::min(1400, h);
         downscaled.resize(static_cast<size_t>(upW * upH * 4));
-        unsigned char* dst = downscaled.data();
+        float scaleX = static_cast<float>(w) / static_cast<float>(upW);
+        float scaleY = static_cast<float>(h) / static_cast<float>(upH);
         for (int y = 0; y < upH; ++y) {
-            int sy = (y * h) / upH;
-            const uint32_t* srcRow = reinterpret_cast<const uint32_t*>(img + sy * w * 4);
-            uint32_t* dstRow = reinterpret_cast<uint32_t*>(dst + y * upW * 4);
+            float srcY = (static_cast<float>(y) + 0.5f) * scaleY - 0.5f;
+            int y0 = std::clamp(static_cast<int>(std::floor(srcY)), 0, h - 1);
+            int y1 = std::clamp(y0 + 1, 0, h - 1);
+            float fy = srcY - std::floor(srcY);
+
             for (int x = 0; x < upW; ++x) {
-                dstRow[x] = srcRow[(x * w) / upW];
+                float srcX = (static_cast<float>(x) + 0.5f) * scaleX - 0.5f;
+                int x0 = std::clamp(static_cast<int>(std::floor(srcX)), 0, w - 1);
+                int x1 = std::clamp(x0 + 1, 0, w - 1);
+                float fx = srcX - std::floor(srcX);
+
+                const unsigned char* p00 = img + (y0 * w + x0) * 4;
+                const unsigned char* p10 = img + (y0 * w + x1) * 4;
+                const unsigned char* p01 = img + (y1 * w + x0) * 4;
+                const unsigned char* p11 = img + (y1 * w + x1) * 4;
+
+                unsigned char* outPixel = downscaled.data() + (y * upW + x) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    float top = p00[c] * (1.0f - fx) + p10[c] * fx;
+                    float bot = p01[c] * (1.0f - fx) + p11[c] * fx;
+                    float val = top * (1.0f - fy) + bot * fy;
+                    outPixel[c] = static_cast<unsigned char>(std::clamp(val + 0.5f, 0.0f, 255.0f));
+                }
             }
         }
         uploadPtr = downscaled.data();
@@ -188,22 +210,19 @@ static GLuint loadTextureFromFile(const fs::path& p, glm::vec3* outAccent) {
     f.seekg(0, std::ios::beg);
     std::vector<unsigned char> buf(static_cast<size_t>(sz));
     if (!f.read(reinterpret_cast<char*>(buf.data()), sz)) return 0;
-    return uploadTextureFromMemory(buf.data(), static_cast<int>(sz), outAccent);
+    return MetadataParser::uploadTextureFromMemory(buf.data(), static_cast<int>(sz), outAccent);
 }
 
-static std::string decodeId3Text(const uint8_t* data, size_t size) {
-    if (!data || size < 2) return "";
-    uint8_t encoding = data[0];
-    const uint8_t* payload = data + 1;
-    size_t len = size - 1;
-
+static std::string decodeRawStringWithEncoding(const uint8_t* payload, size_t len, uint8_t encoding, bool sanitize = true) {
+    if (!payload || len == 0) return "";
     if (encoding == 0) {
         int wlen = MultiByteToWideChar(1251, 0, reinterpret_cast<const char*>(payload), static_cast<int>(len), nullptr, 0);
         if (wlen <= 0) return "";
         std::wstring wstr(wlen, 0);
         MultiByteToWideChar(1251, 0, reinterpret_cast<const char*>(payload), static_cast<int>(len), wstr.data(), wlen);
         if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
-        return sanitizeDashes(trimString(MetadataParser::wideToUtf8(wstr)));
+        std::string res = trimString(MetadataParser::wideToUtf8(wstr));
+        return sanitize ? sanitizeDashes(res) : res;
     } else if (encoding == 1 || encoding == 2) {
         if (len < 2) return "";
         bool bigEndian = (encoding == 2);
@@ -228,14 +247,49 @@ static std::string decodeId3Text(const uint8_t* data, size_t size) {
             if (ch == L'\0') break;
             wstr.push_back(ch);
         }
-        return sanitizeDashes(trimString(MetadataParser::wideToUtf8(wstr)));
+        std::string res = trimString(MetadataParser::wideToUtf8(wstr));
+        return sanitize ? sanitizeDashes(res) : res;
     } else if (encoding == 3) {
         std::string s(reinterpret_cast<const char*>(payload), len);
         auto nullPos = s.find('\0');
         if (nullPos != std::string::npos) s.resize(nullPos);
-        return sanitizeDashes(trimString(s));
+        std::string res = trimString(s);
+        return sanitize ? sanitizeDashes(res) : res;
     }
     return "";
+}
+
+static std::string decodeId3Text(const uint8_t* data, size_t size) {
+    if (!data || size < 2) return "";
+    return decodeRawStringWithEncoding(data + 1, size - 1, data[0], true);
+}
+
+// Декодирование встроенного текста песни из фрейма USLT / SYLT (как в Workers.cpp)
+static std::string decodeId3Lyrics(const uint8_t* payload, size_t size) {
+    if (!payload || size < 5) return "";
+    uint8_t enc = payload[0];
+    size_t offset = 4; // 1 байт кодировки + 3 байта языка (например "eng", "rus")
+
+    if (enc == 1 || enc == 2) {
+        while (offset + 1 < size) {
+            if (payload[offset] == 0 && payload[offset + 1] == 0) {
+                offset += 2;
+                break;
+            }
+            offset += 2;
+        }
+    } else {
+        while (offset < size) {
+            if (payload[offset] == 0) {
+                offset += 1;
+                break;
+            }
+            offset++;
+        }
+    }
+
+    if (offset >= size) return "";
+    return decodeRawStringWithEncoding(payload + offset, size - offset, enc, false);
 }
 
 static uint32_t readSyncSafe32(const uint8_t* b) {
@@ -296,6 +350,9 @@ static GLuint parseAudioTagsAndCover(const fs::path& path, TrackData& track) {
                     } else if (std::strcmp(frameId, "TALB") == 0) {
                         std::string val = decodeId3Text(fData, frameSize);
                         if (!val.empty()) track.album = val;
+                    } else if (std::strcmp(frameId, "USLT") == 0 || std::strcmp(frameId, "SYLT") == 0) {
+                        std::string lyr = decodeId3Lyrics(fData, frameSize);
+                        if (!lyr.empty()) track.embeddedLyrics = lyr;
                     } else if (std::strcmp(frameId, "APIC") == 0 && coverTex == 0 && frameSize > 16) {
                         uint8_t enc = fData[0];
                         size_t idx = 1;
@@ -311,7 +368,23 @@ static GLuint parseAudioTagsAndCover(const fs::path& path, TrackData& track) {
                                 idx++;
                             }
                             if (idx < frameSize) {
-                                coverTex = uploadTextureFromMemory(fData + idx, static_cast<int>(frameSize - idx), &track.accentColor);
+                                coverTex = MetadataParser::uploadTextureFromMemory(fData + idx, static_cast<int>(frameSize - idx), &track.accentColor);
+                                if (coverTex != 0) {
+                                    fs::path cachedCover = CoverFetcher::getCachedCoverPath(track.artist, track.title);
+                                    if (!cachedCover.empty()) {
+                                        std::error_code ec;
+                                        if (!fs::exists(cachedCover, ec)) {
+                                            fs::create_directories(cachedCover.parent_path(), ec);
+                                            std::ofstream out(cachedCover, std::ios::binary);
+                                            if (out.is_open()) {
+                                                out.write(reinterpret_cast<const char*>(fData + idx), frameSize - idx);
+                                            }
+                                        }
+                                        if (fs::exists(cachedCover, ec)) {
+                                            track.coverImagePath = cachedCover.wstring();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -364,12 +437,13 @@ static GLuint parseAudioTagsAndCover(const fs::path& path, TrackData& track) {
                             auto eq = comment.find('=');
                             if (eq != std::string::npos) {
                                 std::string key = comment.substr(0, eq);
-                                std::string val = sanitizeDashes(trimString(comment.substr(eq + 1)));
+                                std::string rawVal = trimString(comment.substr(eq + 1));
                                 std::transform(key.begin(), key.end(), key.begin(), ::toupper);
-                                if (!val.empty()) {
-                                    if (key == "TITLE") track.title = val;
-                                    else if (key == "ARTIST") track.artist = val;
-                                    else if (key == "ALBUM") track.album = val;
+                                if (!rawVal.empty()) {
+                                    if (key == "TITLE") track.title = sanitizeDashes(rawVal);
+                                    else if (key == "ARTIST") track.artist = sanitizeDashes(rawVal);
+                                    else if (key == "ALBUM") track.album = sanitizeDashes(rawVal);
+                                    else if (key == "LYRICS" || key == "UNSYNCEDLYRICS") track.embeddedLyrics = rawVal;
                                 }
                             }
                         }
@@ -389,7 +463,23 @@ static GLuint parseAudioTagsAndCover(const fs::path& path, TrackData& track) {
                                 uint32_t dataLen = readBE32(buf.data() + off);
                                 off += 4;
                                 if (off + dataLen <= blockLen && dataLen > 0) {
-                                    coverTex = uploadTextureFromMemory(buf.data() + off, static_cast<int>(dataLen), &track.accentColor);
+                                    coverTex = MetadataParser::uploadTextureFromMemory(buf.data() + off, static_cast<int>(dataLen), &track.accentColor);
+                                    if (coverTex != 0) {
+                                        fs::path cachedCover = CoverFetcher::getCachedCoverPath(track.artist, track.title);
+                                        if (!cachedCover.empty()) {
+                                            std::error_code ec;
+                                            if (!fs::exists(cachedCover, ec)) {
+                                                fs::create_directories(cachedCover.parent_path(), ec);
+                                                std::ofstream out(cachedCover, std::ios::binary);
+                                                if (out.is_open()) {
+                                                    out.write(reinterpret_cast<const char*>(buf.data() + off), dataLen);
+                                                }
+                                            }
+                                            if (fs::exists(cachedCover, ec)) {
+                                                track.coverImagePath = cachedCover.wstring();
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -405,8 +495,9 @@ static GLuint parseAudioTagsAndCover(const fs::path& path, TrackData& track) {
     return 0;
 }
 
-static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::wstring& title, const glm::vec3& accent) {
-    const int W = 512, H = 168;
+GLuint MetadataParser::createCoverBottomBadgeGDI(const std::wstring& artist, const std::wstring& title, const glm::vec3& accent) {
+    // 2x суперсэмплирование (1024x336) для кристально чёткого текста названия и исполнителя без мыла
+    const int W = 1024, H = 336;
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = W;
@@ -430,7 +521,7 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
     SetTextColor(memDC, RGB(255, 255, 255));
 
     LOGFONTW lfTitle = {0};
-    lfTitle.lfHeight = 40;
+    lfTitle.lfHeight = 80;
     lfTitle.lfWeight = FW_EXTRABOLD;
     lfTitle.lfQuality = CLEARTYPE_QUALITY;
     wcscpy_s(lfTitle.lfFaceName, L"Segoe UI");
@@ -438,11 +529,11 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
     HFONT hFontTitle = CreateFontIndirectW(&lfTitle);
     HGDIOBJ oldFont = SelectObject(memDC, hFontTitle);
 
-    RECT trcTitle = {28, 34, W - 28, 86};
+    RECT trcTitle = {56, 68, W - 56, 172};
     DrawTextW(memDC, title.c_str(), -1, &trcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     LOGFONTW lfArtist = {0};
-    lfArtist.lfHeight = 26;
+    lfArtist.lfHeight = 52;
     lfArtist.lfWeight = FW_SEMIBOLD;
     lfArtist.lfQuality = CLEARTYPE_QUALITY;
     wcscpy_s(lfArtist.lfFaceName, L"Segoe UI");
@@ -450,7 +541,7 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
     HFONT hFontArtist = CreateFontIndirectW(&lfArtist);
     SelectObject(memDC, hFontArtist);
 
-    RECT trcArtist = {28, 88, W - 28, 128};
+    RECT trcArtist = {56, 176, W - 56, 256};
     DrawTextW(memDC, artist.c_str(), -1, &trcArtist, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     GdiFlush();
@@ -466,16 +557,16 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
     for (int y = 0; y < H; ++y) {
         int srcY = H - 1 - y;
         int gradA = (srcY * 242) / (H - 1);
-        uint32_t textTintR = (srcY >= 86) ? 215 : 255;
-        uint32_t textTintG = (srcY >= 86) ? 222 : 255;
-        uint32_t textTintB = (srcY >= 86) ? 235 : 255;
-        bool inBarRow = (srcY >= 136 && srcY <= 141);
+        uint32_t textTintR = (srcY >= 172) ? 215 : 255;
+        uint32_t textTintG = (srcY >= 172) ? 222 : 255;
+        uint32_t textTintB = (srcY >= 172) ? 235 : 255;
+        bool inBarRow = (srcY >= 272 && srcY <= 282);
 
         const unsigned char* srcRow = maskRaw + srcY * W * 4;
         unsigned char* dstRow = dstBase + y * W * 4;
 
         for (int x = 0; x < W; ++x) {
-            if (inBarRow && x >= 28 && x <= 132) {
+            if (inBarRow && x >= 56 && x <= 264) {
                 dstRow[x * 4 + 0] = accR;
                 dstRow[x * 4 + 1] = accG;
                 dstRow[x * 4 + 2] = accB;
@@ -497,7 +588,7 @@ static GLuint createCoverBottomBadgeGDI(const std::wstring& artist, const std::w
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, dstBase);
     glGenerateMipmap(GL_TEXTURE_2D);
-    applySharpTextureParams(-0.55f);
+    applySharpTextureParams(-0.65f);
 
     SelectObject(memDC, oldFont);
     DeleteObject(hFontTitle);
@@ -600,6 +691,9 @@ TrackData MetadataParser::parse(const std::wstring& path, int index) {
     t.accentColor = fallbackColors[index % 5];
 
     t.coverTex = parseAudioTagsAndCover(p, t);
+    if (t.coverTex != 0) {
+        t.hasRealCover = true;
+    }
 
     if (t.coverTex == 0) {
         std::error_code ec;
@@ -611,7 +705,24 @@ TrackData MetadataParser::parse(const std::wstring& path, int index) {
         for (const auto& n : names) {
             if (fs::exists(dir / n, ec)) {
                 t.coverTex = loadTextureFromFile(dir / n, &t.accentColor);
-                if (t.coverTex != 0) break;
+                if (t.coverTex != 0) {
+                    t.hasRealCover = true;
+                    t.coverImagePath = (dir / n).wstring();
+                    break;
+                }
+            }
+        }
+    }
+
+    // Проверяем локальный дисковый кэш обложек (covers_cache/)
+    if (t.coverTex == 0) {
+        std::error_code ec;
+        fs::path cachedCover = CoverFetcher::getCachedCoverPath(t.artist, t.title);
+        if (!cachedCover.empty() && fs::exists(cachedCover, ec)) {
+            t.coverTex = loadTextureFromFile(cachedCover, &t.accentColor);
+            if (t.coverTex != 0) {
+                t.hasRealCover = true;
+                t.coverImagePath = cachedCover.wstring();
             }
         }
     }
@@ -621,6 +732,7 @@ TrackData MetadataParser::parse(const std::wstring& path, int index) {
     std::wstring wAlbum = utf8ToWide(t.album);
 
     if (t.coverTex == 0) {
+        t.hasRealCover = false;
         t.coverTex = createFallbackCover(t.accentColor);
     }
 
