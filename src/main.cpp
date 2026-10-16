@@ -3705,3 +3705,12 @@ int main() {
     CoUninitialize();
     return 0;
 }
+
+#if defined(_WIN32)
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    return main();
+}
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return main();
+}
+#endif

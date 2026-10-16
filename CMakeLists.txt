@@ -61,7 +61,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-add_executable(JewelPlayer
+add_executable(JewelPlayer WIN32
         src/AudioEngine.cpp
         src/Metadata.cpp
         src/LyricsFetcher.cpp
@@ -108,3 +108,7 @@ target_link_libraries(JewelPlayer PRIVATE
         psapi
         windowsapp
 )
+
+if(MSVC)
+    target_link_options(JewelPlayer PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:mainCRTStartup")
+endif()

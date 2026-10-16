@@ -273,11 +273,50 @@ struct YandexMusicManager::Impl {
         std::wstring scriptArg = L"\"" + scriptPath.wstring() + L"\"";
         std::wstring dirArg = exeDir.wstring();
 
-        // Пробуем запустить скрытно через pyw.exe -> pythonw.exe -> py.exe -> python.exe
-        const wchar_t* launchers[] = { L"pyw.exe", L"pythonw.exe", L"py.exe", L"python.exe" };
-        for (const wchar_t* launcher : launchers) {
-            HINSTANCE hInst = ShellExecuteW(nullptr, L"open", launcher, scriptArg.c_str(), dirArg.c_str(), SW_HIDE);
-            if (reinterpret_cast<INT_PTR>(hInst) > 32) {
+        // 1. Собираем пути к интерпретаторам Python
+        std::vector<std::wstring> candidates;
+
+        // Поиск в стандартных каталогах установки пользователя (AppData\Local\Programs\Python)
+        wchar_t* localAppData = nullptr;
+        if (_wdupenv_s(&localAppData, nullptr, L"LOCALAPPDATA") == 0 && localAppData) {
+            fs::path pyRoot = fs::path(localAppData) / L"Programs" / L"Python";
+            std::error_code ec;
+            if (fs::exists(pyRoot, ec)) {
+                for (const auto& entry : fs::directory_iterator(pyRoot, ec)) {
+                    if (entry.is_directory(ec)) {
+                        fs::path pw = entry.path() / L"pythonw.exe";
+                        if (fs::exists(pw, ec)) candidates.push_back(pw.wstring());
+                        fs::path p = entry.path() / L"python.exe";
+                        if (fs::exists(p, ec)) candidates.push_back(p.wstring());
+                    }
+                }
+            }
+            free(localAppData);
+        }
+
+        // Общие имена в PATH
+        candidates.push_back(L"pythonw.exe");
+        candidates.push_back(L"pyw.exe");
+        candidates.push_back(L"python.exe");
+        candidates.push_back(L"py.exe");
+
+        // Запуск через CreateProcessW с флагами CREATE_NO_WINDOW | DETACHED_PROCESS гарантирует,
+        // что Windows ни при каких обстоятельствах не откроет консольное окно для скрипта!
+        for (const auto& launcher : candidates) {
+            std::wstring cmdLine = L"\"" + launcher + L"\" " + scriptArg;
+            std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+            cmdBuf.push_back(L'\0');
+
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+
+            PROCESS_INFORMATION pi{};
+            DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
+            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, flags, nullptr, dirArg.c_str(), &si, &pi)) {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
                 break;
             }
         }
