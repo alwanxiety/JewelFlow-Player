@@ -3,7 +3,7 @@
 Локальный аудиоплеер, главной идеей которого является полка с CD боксами, вместо привычного скучного списка треков.
 
 <p align="center">
-  <img width="1380" height="800" alt="Снимок экрана 2026-10-17 022354" src="https://github.com/user-attachments/assets/1a396eef-9098-43e1-813c-231b283e618f" />
+  <img width="1380" height="800" alt="Снимок экрана 2026-10-18 015509" src="https://github.com/user-attachments/assets/7918fb67-6a41-42a8-bebb-3bcbc7a0b154" />
 </p>
 
 <div align="center">
