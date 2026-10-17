@@ -36,29 +36,51 @@ static const char* kBgFS = R"(
 #version 330 core
 out vec4 FragColor;
 in vec2 vUV;
+
 uniform vec3 uAccent;
+uniform vec3 uPrevAccent;
+uniform float uTransitionProg;
+uniform vec2 uOrigin;
+uniform float uAspect;
 uniform float uTime;
 
 void main() {
+    // Базовый студийный градиент фона
     vec3 topCol = vec3(0.068, 0.075, 0.098);
     vec3 botCol = vec3(0.032, 0.036, 0.048);
-    vec3 col = mix(botCol, topCol, smoothstep(0.0, 1.0, vUV.y));
+    vec3 baseCol = mix(botCol, topCol, smoothstep(0.0, 1.0, vUV.y));
 
-    // Оптимизированное радиальное свечение: замена length() и exp() на квадратичный спад (dot + clamp)
+    // Результирующий акцентный цвет в данной точке сцены (быстрый путь в покое)
+    vec3 localAccent = uAccent;
+    if (uTransitionProg < 0.999) {
+        vec2 dOrigin = (vUV - uOrigin) * vec2(uAspect, 1.0);
+        float dist = length(dOrigin);
+        float p = clamp(uTransitionProg, 0.0, 1.0);
+        float ease = p * p * (3.0 - 2.0 * p);
+        float waveRadius = mix(-0.20, 2.30, ease);
+        float fillAlpha = (1.0 - smoothstep(waveRadius - 0.55, waveRadius + 0.12, dist)) * smoothstep(0.0, 0.12, p);
+        float crestDist = abs(dist - (waveRadius - 0.12));
+        float crest = exp(-crestDist * crestDist * 16.0) * (1.0 - ease) * smoothstep(0.0, 0.15, p) * 0.32;
+        localAccent = mix(uPrevAccent, uAccent, fillAlpha) + uAccent * crest;
+    }
+
+    // 1. Центральное объёмное свечение (мягко дышащее со временем)
     vec2 glowCenter = vec2(0.50 + 0.05 * sin(uTime * 0.30), 0.50);
     vec2 dVec = (vUV - glowCenter) * vec2(1.5, 1.0);
     float d2 = dot(dVec, dVec);
     float glow = clamp(1.0 - d2 * 1.6, 0.0, 1.0);
-    col += uAccent * (glow * glow * 0.17);
+    vec3 col = baseCol + localAccent * (glow * glow * 0.18);
 
+    // 2. Линия полки
     float horizon = 0.235;
     float shelfLine = smoothstep(0.004, 0.0, abs(vUV.y - horizon));
-    col += (vec3(0.22, 0.25, 0.32) + uAccent * 0.25) * shelfLine * 0.42;
+    col += (vec3(0.22, 0.25, 0.32) + localAccent * 0.25) * shelfLine * 0.42;
 
+    // 3. Зеркальное отражение на глянцевом полу под полкой
     if (vUV.y < horizon) {
         float t = (horizon - vUV.y) / horizon;
         float tFade = clamp(1.0 - t * 1.5, 0.0, 1.0);
-        vec3 reflCol = vec3(0.022, 0.025, 0.035) + uAccent * (tFade * tFade * 0.05);
+        vec3 reflCol = vec3(0.022, 0.025, 0.035) + localAccent * (tFade * tFade * 0.05);
         col = mix(col, reflCol, smoothstep(0.0, 1.0, t) * 0.78);
     }
 
@@ -104,6 +126,7 @@ in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 
+uniform mat4 uModel;
 uniform vec3 uCamPos;
 uniform vec3 uBaseColor;
 uniform vec3 uAccent;
@@ -132,21 +155,61 @@ void main() {
         vec3 col = mix(baseSpine, uAccent * 0.92, clamp(capMask * 0.75, 0.0, 1.0));
 
         // Мягкое скругление только заднего ребра корешка (стык с задней крышкой).
-        // На переднем стыке с обложкой (vUV.x = 1.0) искусственная полоса убрана, чтобы исключить оптическую щель
         float backEdgeDist = vUV.x;
         float aa = max(fwidth(backEdgeDist), 0.003);
         float edgeBevel = (1.0 - smoothstep(0.025, 0.025 + aa * 2.5, backEdgeDist)) * 0.15;
 
-        vec3 H = normalize(L1 + V);
-        float spec = pow(max(dot(N, H), 0.0), 42.0) * 0.24;
+        // Плавный, естественный переход на переднем стыке с обложкой (vUV.x -> 1.0):
+        // Скругление нормали (филлет ~1.5мм), непрерывное скольжение диффузного света и блика
+        vec3 frontNorm = normalize(uModel[2].xyz);
+        float seamDist = 1.0 - vUV.x;
+        float t = clamp(seamDist / 0.14, 0.0, 1.0);
+        float smoothT = t * t * (3.0 - 2.0 * t);
+        vec3 effN = normalize(mix(frontNorm, N, 0.50 + 0.50 * smoothT));
 
-        vec3 finalCol = col * lighting + vec3(spec + edgeBevel) + uAccent * (uHighlight * 0.32);
+        float effDiff1 = max(dot(effN, L1), 0.0);
+        float effDiff2 = max(dot(effN, L2), 0.0);
+        float effLighting = 0.80 + 0.22 * effDiff1 + 0.08 * effDiff2;
+
+        vec3 H = normalize(L1 + V);
+        float spec = pow(max(dot(effN, H), 0.0), 42.0) * 0.24;
+        float cornerSheen = pow(max(dot(effN, H), 0.0), 28.0) * (1.0 - smoothT) * 0.10;
+
+        // Деликатное оптическое сглаживание тона на самом стыке (эффект прозрачного акрилового угла)
+        float cornerWeight = (1.0 - smoothT) * 0.40;
+        if (cornerWeight > 0.002) {
+            vec3 coverEdgeCol = textureLod(uTex, vec2(0.002, vUV.y), 0.0).rgb;
+            col = mix(col, mix(col, coverEdgeCol, 0.35), cornerWeight);
+        }
+
+        vec3 finalCol = col * effLighting + vec3(spec + edgeBevel + cornerSheen) + uAccent * (uHighlight * 0.32);
         FragColor = vec4(finalCol, uOpacity);
     }
     else if (uType == 2) {
         vec3 col = texture(uTex, vUV).rgb;
-        // Кристальная глубина цвета обложки с сочным освещением
-        vec3 finalCol = col * (0.92 + 0.16 * diff1) + uAccent * (uHighlight * 0.18);
+
+        // Плавный, естественный переход на левом стыке с боковым корешком (vUV.x -> 0.0):
+        // Скругление нормали (филлет ~1.5мм) навстречу грани корешка
+        vec3 spineNorm = normalize(-uModel[0].xyz);
+        float seamDist = vUV.x;
+        float t = clamp(seamDist / 0.012, 0.0, 1.0);
+        float smoothT = t * t * (3.0 - 2.0 * t);
+        vec3 effN = normalize(mix(spineNorm, N, 0.50 + 0.50 * smoothT));
+
+        float effDiff1 = max(dot(effN, L1), 0.0);
+        vec3 H = normalize(L1 + V);
+        float spec = pow(max(dot(effN, H), 0.0), 32.0) * 0.14;
+        float cornerSheen = pow(max(dot(effN, H), 0.0), 28.0) * (1.0 - smoothT) * 0.10;
+
+        // Деликатное оптическое сглаживание тона на самом ребре
+        vec3 spineTone = vec3(0.11, 0.125, 0.16);
+        col = mix(col, mix(col, spineTone, 0.20), (1.0 - smoothT) * 0.30);
+
+        // Ободок акрила только по внешним открытым граням (справа, сверху, снизу).
+        // На левом ребре (стык с корешком) ободок исключён, чтобы обложка монолитно переходила в боковую грань без щели и белесой полосы.
+        float dEdge = min(1.0 - vUV.x, min(vUV.y, 1.0 - vUV.y));
+        float rim = (1.0 - smoothstep(0.005, 0.015, dEdge)) * 0.20;
+        vec3 finalCol = col * (0.92 + 0.16 * effDiff1) + vec3(spec + rim + cornerSheen) + uAccent * (uHighlight * 0.22);
         FragColor = vec4(finalCol, uOpacity);
     }
     else if (uType == 4) {
@@ -201,8 +264,8 @@ void main() {
         float spec2 = pow(max(dot(N, H2), 0.0), 24.0) * 0.25;
         float fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 3.4);
 
-        // Ободок акрила: мягко затухает на левом ребре (vUV.x = 0), чтобы не образовывать двойную белую полосу с корешком
-        float dEdge = min(min(vUV.x * 4.0, 1.0 - vUV.x), min(vUV.y, 1.0 - vUV.y));
+        // Ободок акрила только по внешним открытым граням (справа, сверху, снизу)
+        float dEdge = min(1.0 - vUV.x, min(vUV.y, 1.0 - vUV.y));
         float aa = max(fwidth(dEdge), 0.002);
         float rim = (1.0 - smoothstep(0.008, 0.008 + aa * 2.0, dEdge)) * 0.40;
 
@@ -512,8 +575,12 @@ void Renderer::compileShaders() {
     glDeleteShader(bgVs);
     glDeleteShader(bgFs);
 
-    m_bgLocAccent = glGetUniformLocation(m_bgShader, "uAccent");
-    m_bgLocTime   = glGetUniformLocation(m_bgShader, "uTime");
+    m_bgLocAccent      = glGetUniformLocation(m_bgShader, "uAccent");
+    m_bgLocPrevAccent  = glGetUniformLocation(m_bgShader, "uPrevAccent");
+    m_bgLocTransition  = glGetUniformLocation(m_bgShader, "uTransitionProg");
+    m_bgLocOrigin      = glGetUniformLocation(m_bgShader, "uOrigin");
+    m_bgLocAspect      = glGetUniformLocation(m_bgShader, "uAspect");
+    m_bgLocTime        = glGetUniformLocation(m_bgShader, "uTime");
 
     GLuint vs = compile(GL_VERTEX_SHADER, kCaseVS);
     GLuint fsCase = compile(GL_FRAGMENT_SHADER, kCaseFS);
@@ -592,36 +659,36 @@ void Renderer::buildGeometry() {
     const float w = kBoxW, h = kBoxH, d = kBoxD;
 
     std::vector<Vertex> bVerts = {
-        // Face 0: Front Cover (+Z) — плотно смыкается с левым корешком без зазора
-        { {-0.0006f, -h*0.5f,  d*0.5f}, {0,0, 1}, {0,0} },
-        { {       w, -h*0.5f,  d*0.5f}, {0,0, 1}, {1,0} },
-        { {       w,  h*0.5f,  d*0.5f}, {0,0, 1}, {1,1} },
-        { {-0.0006f,  h*0.5f,  d*0.5f}, {0,0, 1}, {0,1} },
-        // Face 1: Left Spine (-X) — бесшовно смыкается с передней обложкой
-        { {0.0f, -h*0.5f, -d*0.5f}, {-1,0,0}, {0,0} },
-        { {0.0f, -h*0.5f,  d*0.5f + 0.0006f}, {-1,0,0}, {1,0} },
-        { {0.0f,  h*0.5f,  d*0.5f + 0.0006f}, {-1,0,0}, {1,1} },
-        { {0.0f,  h*0.5f, -d*0.5f}, {-1,0,0}, {0,1} },
+        // Face 0: Front Cover (+Z) — абсолютно бесшовное смыкание с левым корешком
+        { { 0.0f, -h*0.5f,  d*0.5f}, {0,0, 1}, {0,0} },
+        { {    w, -h*0.5f,  d*0.5f}, {0,0, 1}, {1,0} },
+        { {    w,  h*0.5f,  d*0.5f}, {0,0, 1}, {1,1} },
+        { { 0.0f,  h*0.5f,  d*0.5f}, {0,0, 1}, {0,1} },
+        // Face 1: Left Spine (-X) — единая общая 3D-вершина с обложкой по ребру X=0, Z=+d/2
+        { { 0.0f, -h*0.5f, -d*0.5f}, {-1,0,0}, {0,0} },
+        { { 0.0f, -h*0.5f,  d*0.5f}, {-1,0,0}, {1,0} },
+        { { 0.0f,  h*0.5f,  d*0.5f}, {-1,0,0}, {1,1} },
+        { { 0.0f,  h*0.5f, -d*0.5f}, {-1,0,0}, {0,1} },
         // Face 2: Back Inlay (-Z) — задняя крышка для отображения текста песни!
-        { {   w, -h*0.5f, -d*0.5f}, {0,0,-1}, {0,0} },
-        { {0.0f, -h*0.5f, -d*0.5f}, {0,0,-1}, {1,0} },
-        { {0.0f,  h*0.5f, -d*0.5f}, {0,0,-1}, {1,1} },
-        { {   w,  h*0.5f, -d*0.5f}, {0,0,-1}, {0,1} },
+        { {    w, -h*0.5f, -d*0.5f}, {0,0,-1}, {0,0} },
+        { { 0.0f, -h*0.5f, -d*0.5f}, {0,0,-1}, {1,0} },
+        { { 0.0f,  h*0.5f, -d*0.5f}, {0,0,-1}, {1,1} },
+        { {    w,  h*0.5f, -d*0.5f}, {0,0,-1}, {0,1} },
         // Face 3: Right (+X)
-        { {   w, -h*0.5f,  d*0.5f + 0.0006f}, { 1,0,0}, {0,0} },
-        { {   w, -h*0.5f, -d*0.5f}, { 1,0,0}, {1,0} },
-        { {   w,  h*0.5f, -d*0.5f}, { 1,0,0}, {1,1} },
-        { {   w,  h*0.5f,  d*0.5f + 0.0006f}, { 1,0,0}, {0,1} },
+        { {    w, -h*0.5f,  d*0.5f}, { 1,0,0}, {0,0} },
+        { {    w, -h*0.5f, -d*0.5f}, { 1,0,0}, {1,0} },
+        { {    w,  h*0.5f, -d*0.5f}, { 1,0,0}, {1,1} },
+        { {    w,  h*0.5f,  d*0.5f}, { 1,0,0}, {0,1} },
         // Face 4: Top (+Y)
-        { {-0.0006f,  h*0.5f,  d*0.5f + 0.0006f}, {0, 1,0}, {0,0} },
-        { {       w,  h*0.5f,  d*0.5f + 0.0006f}, {0, 1,0}, {1,0} },
-        { {       w,  h*0.5f, -d*0.5f}, {0, 1,0}, {1,1} },
-        { {-0.0006f,  h*0.5f, -d*0.5f}, {0, 1,0}, {0,1} },
+        { { 0.0f,  h*0.5f,  d*0.5f}, {0, 1,0}, {0,0} },
+        { {    w,  h*0.5f,  d*0.5f}, {0, 1,0}, {1,0} },
+        { {    w,  h*0.5f, -d*0.5f}, {0, 1,0}, {1,1} },
+        { { 0.0f,  h*0.5f, -d*0.5f}, {0, 1,0}, {0,1} },
         // Face 5: Bottom (-Y)
-        { {-0.0006f, -h*0.5f, -d*0.5f}, {0,-1,0}, {0,0} },
-        { {       w, -h*0.5f, -d*0.5f}, {0,-1,0}, {1,0} },
-        { {       w, -h*0.5f,  d*0.5f + 0.0006f}, {0,-1,0}, {1,1} },
-        { {-0.0006f, -h*0.5f,  d*0.5f + 0.0006f}, {0,-1,0}, {0,1} }
+        { { 0.0f, -h*0.5f, -d*0.5f}, {0,-1,0}, {0,0} },
+        { {    w, -h*0.5f, -d*0.5f}, {0,-1,0}, {1,0} },
+        { {    w, -h*0.5f,  d*0.5f}, {0,-1,0}, {1,1} },
+        { { 0.0f, -h*0.5f,  d*0.5f}, {0,-1,0}, {0,1} }
     };
 
     std::vector<uint32_t> bInds;
@@ -647,10 +714,10 @@ void Renderer::buildGeometry() {
 
     float badgeH = h * 0.33f;
     std::vector<Vertex> badgeVerts = {
-        { {-0.0006f, -h*0.5f,          d*0.5f + 0.0002f}, {0,0,1}, {0,0} },
-        { {       w, -h*0.5f,          d*0.5f + 0.0002f}, {0,0,1}, {1,0} },
-        { {       w, -h*0.5f + badgeH, d*0.5f + 0.0002f}, {0,0,1}, {1,1} },
-        { {-0.0006f, -h*0.5f + badgeH, d*0.5f + 0.0002f}, {0,0,1}, {0,1} }
+        { { 0.0f, -h*0.5f,          d*0.5f + 0.0002f}, {0,0,1}, {0,0} },
+        { {    w, -h*0.5f,          d*0.5f + 0.0002f}, {0,0,1}, {1,0} },
+        { {    w, -h*0.5f + badgeH, d*0.5f + 0.0002f}, {0,0,1}, {1,1} },
+        { { 0.0f, -h*0.5f + badgeH, d*0.5f + 0.0002f}, {0,0,1}, {0,1} }
     };
     glGenVertexArrays(1, &m_badgeVAO);
     glGenBuffers(1, &m_badgeVBO);
@@ -686,16 +753,16 @@ void Renderer::buildGeometry() {
     float reflH = h * 0.42f;
     std::vector<Vertex> reflVerts = {
         // Quad 0: Отражение лицевой обложки (+Z, aNormal = {0, 0, 1} -> vNormal.y == 0.0)
-        { {-0.0006f, -h*0.5f - reflH, d*0.5f}, {0,0,1}, {0.0f, 1.0f} },
-        { {       w, -h*0.5f - reflH, d*0.5f}, {0,0,1}, {1.0f, 1.0f} },
-        { {       w, -h*0.5f,         d*0.5f}, {0,0,1}, {1.0f, 0.0f} },
-        { {-0.0006f, -h*0.5f,         d*0.5f}, {0,0,1}, {0.0f, 0.0f} },
+        { { 0.0f, -h*0.5f - reflH, d*0.5f}, {0,0,1}, {0.0f, 1.0f} },
+        { {    w, -h*0.5f - reflH, d*0.5f}, {0,0,1}, {1.0f, 1.0f} },
+        { {    w, -h*0.5f,         d*0.5f}, {0,0,1}, {1.0f, 0.0f} },
+        { { 0.0f, -h*0.5f,         d*0.5f}, {0,0,1}, {0.0f, 0.0f} },
 
         // Quad 1: Отражение боковой грани/корешка (-X, aNormal = {0, 1, 0} -> vNormal.y == 1.0)
-        { {0.0f, -h*0.5f - reflH, -d*0.5f},           {0,1,0}, {0.0f, 1.0f} },
-        { {0.0f, -h*0.5f - reflH,  d*0.5f + 0.0006f}, {0,1,0}, {1.0f, 1.0f} },
-        { {0.0f, -h*0.5f,          d*0.5f + 0.0006f}, {0,1,0}, {1.0f, 0.0f} },
-        { {0.0f, -h*0.5f,         -d*0.5f},           {0,1,0}, {0.0f, 0.0f} }
+        { { 0.0f, -h*0.5f - reflH, -d*0.5f}, {0,1,0}, {0.0f, 1.0f} },
+        { { 0.0f, -h*0.5f - reflH,  d*0.5f}, {0,1,0}, {1.0f, 1.0f} },
+        { { 0.0f, -h*0.5f,          d*0.5f}, {0,1,0}, {1.0f, 0.0f} },
+        { { 0.0f, -h*0.5f,         -d*0.5f}, {0,1,0}, {0.0f, 0.0f} }
     };
     std::vector<uint32_t> reflInds = {
         0, 1, 2, 0, 2, 3,  // Quad 0: Обложка
@@ -780,6 +847,39 @@ glm::vec4 Renderer::getInspectBoxScreenRect() const {
     return glm::vec4(minX, minY, maxX, maxY);
 }
 
+glm::vec3 Renderer::getCurrentAccent() const {
+    if (m_accentTransitionProg >= 1.0f) {
+        return m_targetAccent;
+    }
+    float p = std::clamp(m_accentTransitionProg, 0.0f, 1.0f);
+    float ease = p * p * (3.0f - 2.0f * p);
+    return glm::mix(m_prevAccent, m_targetAccent, ease);
+}
+
+glm::vec3 Renderer::getAccentAtScreenPos(const glm::vec2& screenPos) const {
+    if (m_accentTransitionProg >= 1.0f) {
+        return m_targetAccent;
+    }
+    float u = (m_width > 0) ? (screenPos.x / static_cast<float>(m_width)) : 0.5f;
+    float v = (m_height > 0) ? ((static_cast<float>(m_height) - screenPos.y) / static_cast<float>(m_height)) : 0.5f;
+    float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.777f;
+
+    glm::vec2 dOrigin(u - m_accentOrigin.x, v - m_accentOrigin.y);
+    dOrigin.x *= aspect;
+    float dist = glm::length(dOrigin);
+
+    float p = glm::clamp(m_accentTransitionProg, 0.0f, 1.0f);
+    float ease = p * p * (3.0f - 2.0f * p);
+    float waveRadius = glm::mix(-0.20f, 2.30f, ease);
+
+    float fillAlpha = (1.0f - glm::smoothstep(waveRadius - 0.55f, waveRadius + 0.12f, dist)) * glm::smoothstep(0.0f, 0.12f, p);
+    float crestDist = std::abs(dist - (waveRadius - 0.12f));
+    float crest = std::exp(-crestDist * crestDist * 16.0f) * (1.0f - ease) * glm::smoothstep(0.0f, 0.15f, p) * 0.32f;
+
+    glm::vec3 col = glm::mix(m_prevAccent, m_targetAccent, fillAlpha) + m_targetAccent * crest;
+    return glm::clamp(col, 0.0f, 1.0f);
+}
+
 int Renderer::pickTrack(double mouseX,
                         double mouseY,
                         const std::vector<int>& visibleIndices,
@@ -800,19 +900,25 @@ int Renderer::pickTrack(double mouseX,
     const float localDirZ = (rayDir.x + rayDir.z) * kCos45;
     const float localDir[3] = {localDirX, localDirY, localDirZ};
 
-    const float bMin[3] = {-0.02f, -kBoxH * 0.5f, -kBoxD * 0.65f};
-    const float bMax[3] = {kBoxW * 0.85f, kBoxH * 0.5f, kBoxD * 0.65f};
+    const float bMin[3] = {-0.04f, -kBoxH * 0.52f, -kBoxD * 0.75f};
+    const float bMax[3] = {kBoxW * 0.95f, kBoxH * 0.52f + 0.24f, kBoxD * 0.75f};
 
     int bestTrack = -1;
     float bestT = 1e9f;
 
+    float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.777f;
+    float halfW = 1.40f * aspect;
+    float minCullX = -halfW - 2.5f;
+    float maxCullX =  halfW + 2.0f;
+
     for (size_t slot = 0; slot < visibleIndices.size(); ++slot) {
         float xPos = kStartX + (static_cast<float>(slot) * kSpacing) - shelfScroll;
-        if (xPos < -2.9f || xPos > 2.6f) continue;
+        if (xPos < minCullX || xPos > maxCullX) continue;
 
         int realIdx = visibleIndices[slot];
-        float hW = (realIdx < static_cast<int>(hoverWeights.size())) ? hoverWeights[realIdx] : 0.0f;
-        float curY = hW * 0.22f;
+        // Хит-тест для стабильного курсора: луч проверяется относительно базовой линии полки (curY = 0.0f).
+        // Это исключает паразитный сдвиг хитбокса при подъёме карточки и взаимное дребезжание соседних кейсов!
+        float curY = 0.0f;
 
         float dx = rayNear.x - xPos;
         float dy = rayNear.y - curY;
@@ -877,12 +983,58 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
     // Очищаем только буфер глубины (фон полностью перекрывает цвет без необходимости повторной заливки)
     glClear(GL_DEPTH_BUFFER_BIT);
 
-    // 0. Отрисовка студийного фона без multisample rasterization (у полноэкранного квада нет внутренних диагональных рёбер)
+    // 0. Отрисовка студийного фона с плавным пространственным заполнением акцентным цветом при смене трека
+    if (m_firstAccentFrame) {
+        m_firstAccentFrame = false;
+        m_lastPulseTime = pulseTime;
+        m_prevAccent = themeAccent;
+        m_targetAccent = themeAccent;
+        m_accentTransitionProg = 1.0f;
+        m_lastAccentTrack = (rouletteHighlightIndex >= 0) ? rouletteHighlightIndex : ((activePlayingIndex >= 0) ? activePlayingIndex : selectedIndex);
+    }
+
+    float dt = std::clamp(pulseTime - m_lastPulseTime, 0.0f, 0.1f);
+    m_lastPulseTime = pulseTime;
+
+    int currentTrack = (rouletteHighlightIndex >= 0) ? rouletteHighlightIndex : ((activePlayingIndex >= 0) ? activePlayingIndex : selectedIndex);
+    bool trackChanged = (currentTrack != m_lastAccentTrack && currentTrack >= 0);
+    bool colorChanged = (glm::distance(m_targetAccent, themeAccent) > 0.02f);
+
+    if (trackChanged || colorChanged) {
+        // Если предыдущая волна ещё не завершилась, фиксируем текущий видимый цвет в точке переключения
+        m_prevAccent = getCurrentAccent();
+        m_targetAccent = themeAccent;
+        m_accentTransitionProg = 0.0f;
+        m_lastAccentTrack = currentTrack;
+
+        // Вычисляем экранный эпицентр волны света (позиция активного CD-бокса)
+        if (inspectProgress > 0.01f) {
+            m_accentOrigin = glm::vec2(0.5f, 0.46f);
+        } else if (currentTrack >= 0 && currentTrack < static_cast<int>(playlist.size())) {
+            glm::vec2 boxPt = getBoxTopScreenPos(currentTrack, 0.0f, shelfScroll);
+            float u = boxPt.x / static_cast<float>(m_width);
+            float v = (static_cast<float>(m_height) - boxPt.y) / static_cast<float>(m_height);
+            m_accentOrigin = glm::vec2(std::clamp(u, 0.08f, 0.92f), std::clamp(v, 0.22f, 0.68f));
+        } else {
+            m_accentOrigin = glm::vec2(0.5f, 0.45f);
+        }
+    }
+
+    if (m_accentTransitionProg < 1.0f) {
+        // Плавное заполнение сцены длится ~1.35 секунды
+        m_accentTransitionProg = std::min(1.0f, m_accentTransitionProg + dt / 1.35f);
+    }
+
     glDisable(GL_MULTISAMPLE);
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glUseProgram(m_bgShader);
-    glUniform3fv(m_bgLocAccent, 1, glm::value_ptr(themeAccent));
+    glUniform3fv(m_bgLocAccent, 1, glm::value_ptr(m_targetAccent));
+    glUniform3fv(m_bgLocPrevAccent, 1, glm::value_ptr(m_prevAccent));
+    glUniform1f(m_bgLocTransition, m_accentTransitionProg);
+    glUniform2fv(m_bgLocOrigin, 1, glm::value_ptr(m_accentOrigin));
+    float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : 1.777f;
+    glUniform1f(m_bgLocAspect, aspect);
     glUniform1f(m_bgLocTime, pulseTime);
     glBindVertexArray(m_bgVAO);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
@@ -903,6 +1055,15 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
     float shelfDimOpacity = 1.0f - inspectProgress * 0.62f;
     float shelfPushBackZ = -inspectProgress * 0.65f;
 
+    // Оптимальный расчёт видимой области полки по Frustum камеры (Z=5.6, FOV=28°):
+    // При FOV=28° и расстоянии Z=5.6 видимая полуширина экрана: halfW = 1.40f * aspect.
+    // Бокс, повёрнутый на 45°, имеет проекцию ширины ~1.08f (от xPos - 0.03f до xPos + 1.08f).
+    // Безопасный запас полностью исключает внезапное появление боксов (zero pop-in),
+    // при этом устраняя оверхед рендеринга 12 лишних скрытых боксов за пределами экрана.
+    float halfW = 1.40f * aspect;
+    float minCullX = -halfW - 2.5f;
+    float maxCullX =  halfW + 2.0f;
+
     // 1. Двухслойные тени под видимыми кейсами
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -917,7 +1078,7 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
         if (inspectProgress > 0.01f && realIdx == inspectTrackIdx) continue;
 
         float xPos = kStartX + (static_cast<float>(slot) * kSpacing) - shelfScroll;
-        if (xPos < -2.85f || xPos > 2.45f) continue;
+        if (xPos < minCullX || xPos > maxCullX) continue;
 
         float hW = (realIdx < static_cast<int>(hoverWeights.size())) ? hoverWeights[realIdx] : 0.0f;
 
@@ -962,6 +1123,7 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
 
         // 1) Боковая грань (процедурный минималистичный корешек)
         glUniform1i(m_caseLocType, 1);
+        glBindTexture(GL_TEXTURE_2D, playlist[trackIdx].coverTex);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)(6 * sizeof(uint32_t)));
 
         // 2) Задняя крышка бокса (Back Inlay) — рисуем ТОЛЬКО когда бокс развёрнут в режиме осмотра!
@@ -982,9 +1144,8 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
         glBindTexture(GL_TEXTURE_2D, playlist[trackIdx].coverTex);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)(0 * sizeof(uint32_t)));
 
-        // 4.1) Нежное матовое 3D-отражение (обложка + боковая грань) в лакированном полу (без сглаживания и 0% лишней нагрузки)
+        // 4.1) Нежное матовое 3D-отражение (обложка + боковая грань) в лакированном полу
         if (m_reflectionsEnabled && drawReflection && m_reflVAO != 0) {
-            glDisable(GL_MULTISAMPLE);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDepthMask(GL_FALSE);
@@ -993,9 +1154,6 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
             glDrawElements(GL_TRIANGLES, 12, GL_UNSIGNED_INT, (void*)0);
             glDepthMask(GL_TRUE);
             glDisable(GL_BLEND);
-            if (m_aaMode == AAMode::MSAA) {
-                glEnable(GL_MULTISAMPLE);
-            }
         }
 
         // 5) Плашка с названием и исполнителем внизу лицевой обложки
@@ -1006,15 +1164,17 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
         glBindVertexArray(m_badgeVAO);
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
-        // 6) Акриловый глянец поверх лицевой стороны — минимальный зазор (0.4мм), полностью исключающий щель
-        glDepthMask(GL_FALSE);
-        glUniform1i(m_caseLocType, 3);
-        glm::mat4 glassM = glm::translate(modelMat, glm::vec3(0.0f, 0.0f, 0.0004f));
-        glUniformMatrix4fv(m_caseLocModel, 1, GL_FALSE, glm::value_ptr(glassM));
-        glBindVertexArray(m_boxVAO);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)(0 * sizeof(uint32_t)));
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
+        // 6) Акриловый глянец (в режиме детального осмотра 3D-бокса)
+        if (includeBackFace) {
+            glDepthMask(GL_FALSE);
+            glUniform1i(m_caseLocType, 3);
+            glm::mat4 glassM = glm::translate(modelMat, glm::vec3(0.0f, 0.0f, 0.0004f));
+            glUniformMatrix4fv(m_caseLocModel, 1, GL_FALSE, glm::value_ptr(glassM));
+            glBindVertexArray(m_boxVAO);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, (void*)(0 * sizeof(uint32_t)));
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
     };
 
     int flyingSlot = -1;
@@ -1032,7 +1192,7 @@ void Renderer::renderShelf(const std::vector<TrackData>& playlist,
         }
 
         float xPos = kStartX + (static_cast<float>(slot) * kSpacing) - shelfScroll;
-        if (xPos < -2.85f || xPos > 2.45f) continue;
+        if (xPos < minCullX || xPos > maxCullX) continue;
 
         float hW = (realIdx < static_cast<int>(hoverWeights.size())) ? hoverWeights[realIdx] : 0.0f;
         float curY = hW * 0.22f;

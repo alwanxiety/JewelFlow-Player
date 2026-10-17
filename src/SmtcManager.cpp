@@ -363,7 +363,7 @@ LRESULT SmtcManager::handleWindowMessage(HWND h, UINT msg, WPARAM wParam, LPARAM
         return 0;
     }
 
-    if (msg == WM_COMMAND && HIWORD(wParam) == 0) {
+    if (msg == WM_COMMAND && (HIWORD(wParam) == THBN_CLICKED || HIWORD(wParam) == 0)) {
         UINT id = LOWORD(wParam);
         if (id == kBtnIdPrev) {
             postAction(MediaAction::PrevTrack);

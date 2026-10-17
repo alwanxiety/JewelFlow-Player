@@ -124,17 +124,18 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(RELEASE_DIST_DIR "${CMAKE_CURRENT_BINARY_DIR}/publish")
     set(ROOT_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release")
+    set(APP_DIST_FOLDER_NAME "JewelFlow")
 
     add_custom_command(TARGET JewelPlayer POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIST_DIR}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:JewelPlayer>" "${RELEASE_DIST_DIR}/JewelPlayer.exe"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/dist/ym_bridge.exe" "${RELEASE_DIST_DIR}/ym_bridge.exe"
-        COMMAND ${CMAKE_COMMAND} -E chdir "${RELEASE_DIST_DIR}" ${CMAKE_COMMAND} -E tar cf "JewelFlow-Release.zip" --format=zip "JewelPlayer.exe" "ym_bridge.exe"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${ROOT_RELEASE_DIR}"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/JewelPlayer.exe" "${ROOT_RELEASE_DIR}/JewelPlayer.exe"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/ym_bridge.exe" "${ROOT_RELEASE_DIR}/ym_bridge.exe"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIST_DIR}/${APP_DIST_FOLDER_NAME}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:JewelPlayer>" "${RELEASE_DIST_DIR}/${APP_DIST_FOLDER_NAME}/JewelPlayer.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/dist/ym_bridge.exe" "${RELEASE_DIST_DIR}/${APP_DIST_FOLDER_NAME}/ym_bridge.exe"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${RELEASE_DIST_DIR}" ${CMAKE_COMMAND} -E tar cf "JewelFlow-Release.zip" --format=zip "${APP_DIST_FOLDER_NAME}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ROOT_RELEASE_DIR}/${APP_DIST_FOLDER_NAME}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/${APP_DIST_FOLDER_NAME}/JewelPlayer.exe" "${ROOT_RELEASE_DIR}/${APP_DIST_FOLDER_NAME}/JewelPlayer.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/${APP_DIST_FOLDER_NAME}/ym_bridge.exe" "${ROOT_RELEASE_DIR}/${APP_DIST_FOLDER_NAME}/ym_bridge.exe"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/JewelFlow-Release.zip" "${ROOT_RELEASE_DIR}/JewelFlow-Release.zip"
-        COMMENT "Packaging clean release into ${RELEASE_DIST_DIR} and ${ROOT_RELEASE_DIR} (JewelPlayer.exe, ym_bridge.exe, JewelFlow-Release.zip)"
+        COMMENT "Packaging clean release into ${RELEASE_DIST_DIR} and ${ROOT_RELEASE_DIR} (JewelFlow-Release.zip with JewelFlow folder)"
     )
 endif()
 

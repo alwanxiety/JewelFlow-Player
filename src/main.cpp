@@ -84,6 +84,7 @@ static double g_lastScrollTime = 0.0;
 static AAMode g_savedAAMode = AAMode::MSAA;
 static bool g_savedReflections = true;
 static bool g_boldInterfaceFont = false;
+static int g_monitorRefreshRate = 60;
 
 // ------------------ ДЕБАГ-МОНИТОР ПРОИЗВОДИТЕЛЬНОСТИ (F3) ------------------
 static bool g_showDebugOverlay = false;
@@ -124,6 +125,19 @@ static ImFont* g_fontTitleBold = nullptr;
 static ImFont* g_fontArtistMedium = nullptr;
 static ImFont* g_fontLyricsRegular = nullptr;
 static ImFont* g_fontKaraokeBold = nullptr;
+
+// Респонсивные шрифты для Fullscreen 1080p (Medium) и Fullscreen 1440p / 4K (Large)
+static ImFont* g_fontMainMed = nullptr;
+static ImFont* g_fontTitleMed = nullptr;
+static ImFont* g_fontArtistMed = nullptr;
+static ImFont* g_fontLyricsMed = nullptr;
+static ImFont* g_fontKaraokeMed = nullptr;
+
+static ImFont* g_fontMainLarge = nullptr;
+static ImFont* g_fontTitleLarge = nullptr;
+static ImFont* g_fontArtistLarge = nullptr;
+static ImFont* g_fontLyricsLarge = nullptr;
+static ImFont* g_fontKaraokeLarge = nullptr;
 static LyricsFetcher g_lyricsFetcher;
 static CoverFetcher g_coverFetcher;
 
@@ -141,6 +155,9 @@ struct RouletteState {
 } static g_roulette;
 
 static int g_contextMenuTrack = -1;
+static bool g_showSettingsWindow = false;
+static float g_settingsAnimProgress = 0.0f;
+static float g_settingsGearRotation = 0.0f;
 static WNDPROC g_origWndProc = nullptr;
 
 static std::mt19937& getRng() {
@@ -451,8 +468,14 @@ static void dropCallback(GLFWwindow*, int count, const char** paths) {
 
 static void scrollCallback(GLFWwindow*, double xoffset, double yoffset) {
     if (!ImGui::GetIO().WantCaptureMouse && !g_roulette.active && !g_lyricsInspectMode) {
-        float delta = (std::abs(xoffset) > std::abs(yoffset)) ? static_cast<float>(xoffset) : static_cast<float>(yoffset);
-        g_targetScroll -= delta * 0.36f;
+        float delta = (std::abs(xoffset) > std::abs(yoffset)) ? -static_cast<float>(xoffset) : static_cast<float>(yoffset);
+        // Плавный и информативный скролл: 1 щелчок колеса = 2 трека (0.42f)
+        g_targetScroll -= delta * (kSpacing * 2.0f);
+        if (!g_visibleIndices.empty()) {
+            float maxScroll = (std::max)(0.0f, (static_cast<float>(g_visibleIndices.size()) - 1.0f) * kSpacing);
+            const float overscroll = kSpacing * 1.5f;
+            g_targetScroll = std::clamp(g_targetScroll, -overscroll, maxScroll + overscroll);
+        }
         g_lastScrollTime = glfwGetTime();
     }
 }
@@ -653,7 +676,7 @@ static void syncSmtcPlaybackState(AudioEngine& audio) {
     }
 }
 
-static bool CustomScrubber(const char* label, float* value, float max_val, float width, float height, const ImVec4& accentColor) {
+static bool CustomScrubber(const char* label, float* value, float max_val, float width, float height, const ImVec4& accentColor, bool seekOnRelease = false, bool* outIsDragging = nullptr) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems) return false;
 
@@ -668,6 +691,10 @@ static bool CustomScrubber(const char* label, float* value, float max_val, float
 
     bool hovered = false, held = false;
     ImGui::ButtonBehavior(bb, id, &hovered, &held);
+
+    if (outIsDragging) {
+        *outIsDragging = held;
+    }
 
     float norm = (max_val > 0.0f) ? std::clamp(*value / max_val, 0.0f, 1.0f) : 0.0f;
     if (held && max_val > 0.0f) {
@@ -704,12 +731,146 @@ static bool CustomScrubber(const char* label, float* value, float max_val, float
         ImColor(255, 255, 255, static_cast<int>(accentColor.w * 255.0f))
     );
 
+    if (seekOnRelease) {
+        return ImGui::IsItemDeactivated();
+    }
     return held;
 }
 
-enum class IconType { Play, Pause, Prev, Next, Shuffle, Repeat, Volume, Mute, Dice, Lyrics, Minimize, Maximize, Restore, CloseWin };
+enum class IconType { Play, Pause, Prev, Next, Shuffle, Repeat, Volume, Mute, Dice, Lyrics, Settings, Minimize, Maximize, Restore, CloseWin };
 
-static bool IconButton(const char* idStr, IconType icon, ImVec2 size, bool activeState, const ImVec4& accent, float alpha, bool primary = false) {
+struct ButtonAnimState {
+    float hover = 0.0f;
+    float press = 0.0f;
+    float clickBounce = 0.0f;
+    float repeatAnim = 0.0f;
+    float diceToss = 0.0f;
+    float shuffleAnim = 0.0f;
+    float muteAnim = 0.0f;
+    bool prevActive = false;
+};
+static std::unordered_map<ImGuiID, ButtonAnimState> s_btnAnimMap;
+
+struct ToggleAnimState {
+    float progress = 0.0f;
+    float hover = 0.0f;
+    float press = 0.0f;
+    bool initialized = false;
+};
+static std::unordered_map<ImGuiID, ToggleAnimState> s_toggleAnimMap;
+
+static bool AnimatedToggle(const char* strId, bool* v, const ImVec4& accent, float alpha = 1.0f) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems) return false;
+
+    const ImGuiID id = window->GetID(strId);
+    ImVec2 pos = window->DC.CursorPos;
+    const float w = 46.0f;
+    const float h = 24.0f;
+    const ImRect bb(pos, ImVec2(pos.x + w, pos.y + h));
+    ImGui::ItemSize(bb, 0.0f);
+    if (!ImGui::ItemAdd(bb, id)) return false;
+
+    bool hovered = false, held = false;
+    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+
+    if (pressed) {
+        *v = !(*v);
+    }
+
+    float dt = ImGui::GetIO().DeltaTime;
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
+
+    ToggleAnimState& st = s_toggleAnimMap[id];
+    if (!st.initialized) {
+        st.progress = *v ? 1.0f : 0.0f;
+        st.initialized = true;
+    }
+
+    float targetProg = *v ? 1.0f : 0.0f;
+    float targetHover = hovered ? 1.0f : 0.0f;
+    float targetPress = held ? 1.0f : 0.0f;
+
+    st.progress += (targetProg - st.progress) * std::min(1.0f, 22.0f * dt);
+    st.hover += (targetHover - st.hover) * std::min(1.0f, 18.0f * dt);
+    st.press += (targetPress - st.press) * std::min(1.0f, 25.0f * dt);
+
+    ImDrawList* dl = window->DrawList;
+    float r = h * 0.5f;
+
+    // Плавное перетекание цвета дорожки тумблера: тёмный графит -> яркий динамический акцент
+    ImVec4 offBg(0.18f, 0.20f, 0.26f, 0.90f * alpha);
+    ImVec4 onBg(accent.x, accent.y, accent.z, 0.92f * alpha);
+    ImVec4 curBg(
+        offBg.x + (onBg.x - offBg.x) * st.progress,
+        offBg.y + (onBg.y - offBg.y) * st.progress,
+        offBg.z + (onBg.z - offBg.z) * st.progress,
+        offBg.w + (onBg.w - offBg.w) * st.progress
+    );
+
+    if (st.hover > 0.01f) {
+        curBg.x = std::min(1.0f, curBg.x + 0.08f * st.hover);
+        curBg.y = std::min(1.0f, curBg.y + 0.08f * st.hover);
+        curBg.z = std::min(1.0f, curBg.z + 0.08f * st.hover);
+    }
+
+    // Мягкий неоновый ореол вокруг активного тумблера
+    if (st.progress > 0.01f || st.hover > 0.01f) {
+        float glowA = (st.progress * 0.35f + st.hover * 0.15f) * alpha;
+        dl->AddRectFilled(
+            ImVec2(bb.Min.x - 2.0f, bb.Min.y - 2.0f),
+            ImVec2(bb.Max.x + 2.0f, bb.Max.y + 2.0f),
+            ImColor(accent.x, accent.y, accent.z, glowA * 0.35f),
+            r + 2.0f
+        );
+    }
+
+    // Фоновая подложка дорожки
+    dl->AddRectFilled(bb.Min, bb.Max, ImColor(curBg), r);
+
+    // Тонкая окантовка дорожки
+    ImVec4 borderCol(
+        0.30f + (accent.x - 0.30f) * st.progress,
+        0.34f + (accent.y - 0.34f) * st.progress,
+        0.42f + (accent.z - 0.42f) * st.progress,
+        (0.40f + 0.30f * st.hover) * alpha
+    );
+    dl->AddRect(bb.Min, bb.Max, ImColor(borderCol), r, 0, 1.0f);
+
+    // Бегунок (Knob / Thumb)
+    float knobRadius = r - 2.8f;
+    float startX = bb.Min.x + r;
+    float endX = bb.Max.x - r;
+    float knobX = startX + (endX - startX) * st.progress;
+    float knobY = bb.Min.y + r;
+
+    // При зажатии бегунок слегка удлиняется (тактильный физический отклик)
+    float stretch = st.press * 2.8f;
+    float kLeft = knobX - knobRadius - (st.progress < 0.5f ? 0.0f : stretch);
+    float kRight = knobX + knobRadius + (st.progress >= 0.5f ? 0.0f : stretch);
+    ImVec2 kMin(kLeft, knobY - knobRadius);
+    ImVec2 kMax(kRight, knobY + knobRadius);
+
+    // Мягкая тень под бегунком
+    dl->AddRectFilled(
+        ImVec2(kMin.x, kMin.y + 1.2f),
+        ImVec2(kMax.x, kMax.y + 1.5f),
+        ImColor(0.0f, 0.0f, 0.0f, 0.38f * alpha),
+        knobRadius
+    );
+
+    // Сам круглый бегунок
+    dl->AddRectFilled(kMin, kMax, ImColor(0.98f, 0.99f, 1.0f, 0.98f * alpha), knobRadius);
+    dl->AddRect(kMin, kMax, ImColor(1.0f, 1.0f, 1.0f, 0.80f * alpha), knobRadius, 0, 1.0f);
+
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
+    return pressed;
+}
+
+static bool IconButton(const char* idStr, IconType icon, ImVec2 size, bool activeState, const ImVec4& accent, float alpha, bool primary = false, float extraVal = 0.0f) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems) return false;
 
@@ -722,125 +883,416 @@ static bool IconButton(const char* idStr, IconType icon, ImVec2 size, bool activ
     bool hovered = false, held = false;
     bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
 
+    float dt = ImGui::GetIO().DeltaTime;
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
+    double now = ImGui::GetTime();
+
+    ButtonAnimState& st = s_btnAnimMap[id];
+    float targetHover = hovered ? 1.0f : 0.0f;
+    float targetPress = held ? 1.0f : 0.0f;
+
+    // Лаконичные, быстрые и аккуратные переходы
+    st.hover += (targetHover - st.hover) * std::min(1.0f, 18.0f * dt);
+    st.press += (targetPress - st.press) * std::min(1.0f, 25.0f * dt);
+    st.clickBounce = std::max(0.0f, st.clickBounce - 13.0f * dt);
+    st.repeatAnim = std::max(0.0f, st.repeatAnim - 4.5f * dt);
+    st.diceToss = std::max(0.0f, st.diceToss - 3.8f * dt);
+    st.shuffleAnim = std::max(0.0f, st.shuffleAnim - 5.0f * dt);
+    st.muteAnim = std::max(0.0f, st.muteAnim - 5.0f * dt);
+
+    if (activeState && !st.prevActive && icon == IconType::Repeat) {
+        st.repeatAnim = 1.0f;
+    }
+    if (activeState && icon == IconType::Dice && st.diceToss <= 0.001f) {
+        st.diceToss = 1.0f;
+    }
+    st.prevActive = activeState;
+
+    if (pressed) {
+        st.clickBounce = 1.0f;
+        if (icon == IconType::Repeat) {
+            st.repeatAnim = 1.0f;
+        } else if (icon == IconType::Dice) {
+            st.diceToss = 1.0f;
+        } else if (icon == IconType::Shuffle) {
+            st.shuffleAnim = 1.0f;
+        } else if (icon == IconType::Volume || icon == IconType::Mute) {
+            st.muteAnim = 1.0f;
+        }
+    }
+
     ImDrawList* dl = window->DrawList;
-    ImVec2 c((bb.Min.x + bb.Max.x) * 0.5f, (bb.Min.y + bb.Max.y) * 0.5f);
+    ImVec2 c(std::floor((bb.Min.x + bb.Max.x) * 0.5f), std::floor((bb.Min.y + bb.Max.y) * 0.5f));
 
     bool isCloseBtn = (icon == IconType::CloseWin);
+
+    // Микро-смещения для приятного тактильного отклика (аккуратные и сдержанные)
+    if (icon == IconType::Prev) {
+        c.x -= 1.2f * st.hover;
+    } else if (icon == IconType::Next) {
+        c.x += 1.2f * st.hover;
+    }
+
+    // Физика подбрасывания кубика (Dice Toss) для кнопки рулетки
+    if (icon == IconType::Dice && st.diceToss > 0.001f) {
+        float p = 1.0f - st.diceToss;
+        // Параболическая траектория подбрасывания вверх и приземления
+        float tossY = -7.5f * std::sin(p * 3.14159265f);
+        // Микро-отскок при приземлении
+        if (p > 0.82f) {
+            tossY += std::sin((p - 0.82f) / 0.18f * 3.14159265f) * 1.5f;
+        }
+        c.y += tossY;
+    }
+
+    // Расчёт коэффициента масштабирования (scale) с лаконичной физикой
+    float bounce = std::sin(st.clickBounce * 3.14159265f) * 0.035f;
+    float scale = 1.0f + st.hover * 0.045f - st.press * 0.06f + bounce;
+    if (primary) scale *= 1.0f + st.hover * 0.02f;
+
+    // Угол поворота иконки (только аккуратные наклоны, без бесконечной прокрутки)
+    float iconAngle = 0.0f;
+    if (icon == IconType::Dice) {
+        if (st.diceToss > 0.001f) {
+            float p = 1.0f - st.diceToss;
+            // Естественный наклон кости в полёте (без вращения пропеллером)
+            iconAngle = std::sin(p * 6.2831853f) * 0.20f;
+        } else if (hovered) {
+            iconAngle = std::sin(static_cast<float>(now) * 6.0f) * 0.06f;
+        }
+    } else if (icon == IconType::Settings) {
+        iconAngle = g_settingsGearRotation + st.hover * 0.15f;
+    } else if (icon == IconType::CloseWin) {
+        iconAngle = st.hover * 0.785398f; // Аккуратный поворот на 45 градусов
+    }
+
+    // Мягкий аккуратный ореол за кнопкой
+    if (st.hover > 0.01f || activeState) {
+        float glowR = (size.y * 0.5f) * (1.0f + st.hover * 0.20f);
+        ImVec4 gCol = activeState
+            ? ImVec4(accent.x, accent.y, accent.z, 0.22f * alpha)
+            : (isCloseBtn ? ImVec4(0.92f, 0.20f, 0.25f, 0.20f * st.hover * alpha)
+                          : ImVec4(accent.x, accent.y, accent.z, 0.14f * st.hover * alpha));
+        dl->AddCircleFilled(c, glowR, ImColor(gCol), 24);
+    }
+
+    // Фоновая подложка кнопки с анимированным масштабированием
+    ImVec2 curMin(c.x - size.x * 0.5f * scale, c.y - size.y * 0.5f * scale);
+    ImVec2 curMax(c.x + size.x * 0.5f * scale, c.y + size.y * 0.5f * scale);
 
     if (primary) {
         ImVec4 bg = held ? ImVec4(0.88f, 0.90f, 0.95f, alpha)
                   : (hovered ? ImVec4(1.0f, 1.0f, 1.0f, alpha) : ImVec4(0.95f, 0.96f, 0.98f, 0.95f * alpha));
-        dl->AddCircleFilled(c, size.y * 0.5f, ImColor(bg), 32);
-    } else if (hovered || held || activeState) {
-        if (isCloseBtn && (hovered || held)) {
-            ImVec4 bg = held ? ImVec4(0.82f, 0.18f, 0.24f, 0.95f * alpha)
-                             : ImVec4(0.92f, 0.24f, 0.30f, 0.88f * alpha);
-            dl->AddRectFilled(bb.Min, bb.Max, ImColor(bg), size.y * 0.42f);
-        } else {
-            float bgAlpha = held ? 0.28f : (hovered ? 0.18f : 0.12f);
-            ImVec4 bg = activeState ? ImVec4(accent.x, accent.y, accent.z, bgAlpha * alpha * 1.55f)
-                                    : ImVec4(1.0f, 1.0f, 1.0f, bgAlpha * alpha);
-            dl->AddRectFilled(bb.Min, bb.Max, ImColor(bg), size.y * 0.42f);
+        dl->AddCircleFilled(c, size.y * 0.5f * scale, ImColor(bg), 32);
+    } else {
+        float bgAlpha = held ? 0.32f : (hovered ? 0.22f : (activeState ? 0.16f : 0.08f * st.hover));
+        ImVec4 bg = isCloseBtn && (hovered || held)
+            ? (held ? ImVec4(0.82f, 0.18f, 0.24f, 0.95f * alpha) : ImVec4(0.92f, 0.24f, 0.30f, 0.88f * alpha))
+            : (activeState ? ImVec4(accent.x, accent.y, accent.z, bgAlpha * alpha * 1.55f)
+                           : ImVec4(1.0f, 1.0f, 1.0f, bgAlpha * alpha));
+        if (bgAlpha > 0.005f || isCloseBtn) {
+            dl->AddRectFilled(curMin, curMax, ImColor(bg), size.y * 0.42f * scale);
         }
     }
 
     ImU32 fg = primary
         ? ImColor(ImVec4(0.07f, 0.08f, 0.11f, alpha))
         : (activeState ? ImColor(ImVec4(accent.x, accent.y, accent.z, alpha))
-                       : ImColor(ImVec4(0.92f, 0.94f, 0.98f, (hovered ? 1.0f : 0.80f) * alpha)));
+                       : (isCloseBtn && (hovered || held)
+                           ? ImColor(ImVec4(1.0f, 1.0f, 1.0f, alpha))
+                           : ImColor(ImVec4(0.92f, 0.94f, 0.98f, (hovered ? 1.0f : 0.80f) * alpha))));
+
+    auto xform = [&](const ImVec2& pt) -> ImVec2 {
+        if (std::abs(iconAngle) < 0.001f && std::abs(scale - 1.0f) < 0.001f) {
+            return pt;
+        }
+        float cosA = std::cos(iconAngle);
+        float sinA = std::sin(iconAngle);
+        float dx = (pt.x - c.x) * scale;
+        float dy = (pt.y - c.y) * scale;
+        return ImVec2(c.x + dx * cosA - dy * sinA, c.y + dx * sinA + dy * cosA);
+    };
+
+    auto drawTransformedRect = [&](ImVec2 minP, ImVec2 maxP, ImU32 col, float rounding = 0.0f) {
+        if (std::abs(iconAngle) < 0.001f) {
+            dl->AddRectFilled(xform(minP), xform(maxP), col, rounding * scale);
+        } else {
+            ImVec2 p0 = xform(minP);
+            ImVec2 p1 = xform(ImVec2(maxP.x, minP.y));
+            ImVec2 p2 = xform(maxP);
+            ImVec2 p3 = xform(ImVec2(minP.x, maxP.y));
+            dl->AddQuadFilled(p0, p1, p2, p3, col);
+        }
+    };
+
+    auto drawTransformedRectStroke = [&](ImVec2 minP, ImVec2 maxP, ImU32 col, float rounding = 0.0f, float thick = 1.0f) {
+        if (std::abs(iconAngle) < 0.001f) {
+            dl->AddRect(xform(minP), xform(maxP), col, rounding * scale, 0, thick * scale);
+        } else {
+            ImVec2 p0 = xform(minP);
+            ImVec2 p1 = xform(ImVec2(maxP.x, minP.y));
+            ImVec2 p2 = xform(maxP);
+            ImVec2 p3 = xform(ImVec2(minP.x, maxP.y));
+            dl->AddQuad(p0, p1, p2, p3, col, thick * scale);
+        }
+    };
 
     switch (icon) {
         case IconType::Play: {
             dl->AddTriangleFilled(
-                ImVec2(c.x - 3.5f, c.y - 6.5f),
-                ImVec2(c.x - 3.5f, c.y + 6.5f),
-                ImVec2(c.x + 6.5f, c.y),
+                xform(ImVec2(c.x - 3.5f, c.y - 6.5f)),
+                xform(ImVec2(c.x - 3.5f, c.y + 6.5f)),
+                xform(ImVec2(c.x + 6.5f, c.y)),
                 fg
             );
             break;
         }
         case IconType::Pause: {
-            dl->AddRectFilled(ImVec2(c.x - 5.5f, c.y - 6.0f), ImVec2(c.x - 2.0f, c.y + 6.0f), fg, 1.2f);
-            dl->AddRectFilled(ImVec2(c.x + 2.0f, c.y - 6.0f), ImVec2(c.x + 5.5f, c.y + 6.0f), fg, 1.2f);
+            drawTransformedRect(ImVec2(c.x - 5.5f, c.y - 6.0f), ImVec2(c.x - 2.0f, c.y + 6.0f), fg, 1.2f);
+            drawTransformedRect(ImVec2(c.x + 2.0f, c.y - 6.0f), ImVec2(c.x + 5.5f, c.y + 6.0f), fg, 1.2f);
             break;
         }
         case IconType::Prev: {
-            dl->AddRectFilled(ImVec2(c.x - 6.5f, c.y - 5.5f), ImVec2(c.x - 4.5f, c.y + 5.5f), fg, 1.0f);
+            drawTransformedRect(ImVec2(c.x - 6.5f, c.y - 5.5f), ImVec2(c.x - 4.5f, c.y + 5.5f), fg, 1.0f);
             dl->AddTriangleFilled(
-                ImVec2(c.x + 5.5f, c.y - 5.5f),
-                ImVec2(c.x + 5.5f, c.y + 5.5f),
-                ImVec2(c.x - 3.5f, c.y),
+                xform(ImVec2(c.x + 5.5f, c.y - 5.5f)),
+                xform(ImVec2(c.x + 5.5f, c.y + 5.5f)),
+                xform(ImVec2(c.x - 2.0f, c.y)),
                 fg
             );
             break;
         }
         case IconType::Next: {
             dl->AddTriangleFilled(
-                ImVec2(c.x - 5.5f, c.y - 5.5f),
-                ImVec2(c.x - 5.5f, c.y + 5.5f),
-                ImVec2(c.x + 3.5f, c.y),
+                xform(ImVec2(c.x - 5.5f, c.y - 5.5f)),
+                xform(ImVec2(c.x - 5.5f, c.y + 5.5f)),
+                xform(ImVec2(c.x + 2.0f, c.y)),
                 fg
             );
-            dl->AddRectFilled(ImVec2(c.x + 4.5f, c.y - 5.5f), ImVec2(c.x + 6.5f, c.y + 5.5f), fg, 1.0f);
+            drawTransformedRect(ImVec2(c.x + 4.5f, c.y - 5.5f), ImVec2(c.x + 6.5f, c.y + 5.5f), fg, 1.0f);
             break;
         }
         case IconType::Shuffle: {
-            dl->AddLine(ImVec2(c.x - 6.0f, c.y - 4.0f), ImVec2(c.x + 5.0f, c.y + 4.0f), fg, 1.8f);
-            dl->AddLine(ImVec2(c.x - 6.0f, c.y + 4.0f), ImVec2(c.x + 5.0f, c.y - 4.0f), fg, 1.8f);
-            dl->AddTriangleFilled(ImVec2(c.x + 3.0f, c.y - 6.5f), ImVec2(c.x + 7.0f, c.y - 4.0f), ImVec2(c.x + 3.0f, c.y - 1.5f), fg);
-            dl->AddTriangleFilled(ImVec2(c.x + 3.0f, c.y + 1.5f), ImVec2(c.x + 7.0f, c.y + 4.0f), ImVec2(c.x + 3.0f, c.y + 6.5f), fg);
+            float shAnim = st.shuffleAnim;
+            float shP = (shAnim > 0.001f) ? std::sin((1.0f - shAnim) * 3.14159265f) : 0.0f;
+            float flex = shP * 1.5f;
+            float dart = shP * 1.8f;
+
+            // Две элегантно перекрещивающиеся линии с плавным тактильным изгибом при нажатии
+            dl->AddLine(xform(ImVec2(c.x - 6.5f, c.y - 4.0f)), xform(ImVec2(c.x + 4.5f + dart, c.y + 4.0f + flex)), fg, 1.8f * scale);
+            dl->AddLine(xform(ImVec2(c.x - 6.5f, c.y + 4.0f)), xform(ImVec2(c.x + 4.5f + dart, c.y - 4.0f - flex)), fg, 1.8f * scale);
+
+            // Стрелки на концах перекрестий
+            float topArrX = c.x + 4.5f + dart;
+            float topArrY = c.y - 4.0f - flex;
+            dl->AddTriangleFilled(
+                xform(ImVec2(topArrX - 3.2f, topArrY - 2.8f)),
+                xform(ImVec2(topArrX + 2.4f, topArrY)),
+                xform(ImVec2(topArrX - 3.2f, topArrY + 2.8f)),
+                fg
+            );
+
+            float botArrX = c.x + 4.5f + dart;
+            float botArrY = c.y + 4.0f + flex;
+            dl->AddTriangleFilled(
+                xform(ImVec2(botArrX - 3.2f, botArrY - 2.8f)),
+                xform(ImVec2(botArrX + 2.4f, botArrY)),
+                xform(ImVec2(botArrX - 3.2f, botArrY + 2.8f)),
+                fg
+            );
             break;
         }
         case IconType::Repeat: {
-            dl->AddRect(ImVec2(c.x - 6.5f, c.y - 4.5f), ImVec2(c.x + 6.5f, c.y + 4.5f), fg, 4.0f, 0, 1.8f);
+            // Элегантная закруглённая контурная петля
+            drawTransformedRectStroke(ImVec2(c.x - 6.5f, c.y - 4.5f), ImVec2(c.x + 6.5f, c.y + 4.5f), fg, 3.8f, 1.8f);
+
+            // Анимация стрелочек внутри кнопки при нажатии (лаконичный импульсный сдвиг по циклу)
+            float shift = 0.0f;
+            float arrowScale = 1.0f;
+            if (st.repeatAnim > 0.001f) {
+                float p = 1.0f - st.repeatAnim;
+                float impulse = std::sin(p * 3.14159265f);
+                shift = impulse * 3.2f;
+                arrowScale = 1.0f + impulse * 0.20f;
+            }
+
+            // Стрелка сверху, указывающая направо (по часовой стрелке)
+            float topX = c.x + 4.0f + shift;
+            float topY = c.y - 4.5f;
+            dl->AddTriangleFilled(
+                xform(ImVec2(topX - 3.5f * arrowScale, topY - 3.0f * arrowScale)),
+                xform(ImVec2(topX + 1.2f * arrowScale, topY)),
+                xform(ImVec2(topX - 3.5f * arrowScale, topY + 3.0f * arrowScale)),
+                fg
+            );
+
+            // Стрелка снизу, указывающая налево
+            float botX = c.x - 4.0f - shift;
+            float botY = c.y + 4.5f;
+            dl->AddTriangleFilled(
+                xform(ImVec2(botX + 3.5f * arrowScale, botY - 3.0f * arrowScale)),
+                xform(ImVec2(botX - 1.2f * arrowScale, botY)),
+                xform(ImVec2(botX + 3.5f * arrowScale, botY + 3.0f * arrowScale)),
+                fg
+            );
             break;
         }
         case IconType::Volume: {
-            dl->AddTriangleFilled(ImVec2(c.x - 6.0f, c.y), ImVec2(c.x - 1.0f, c.y - 5.0f), ImVec2(c.x - 1.0f, c.y + 5.0f), fg);
-            dl->AddRectFilled(ImVec2(c.x - 6.5f, c.y - 2.5f), ImVec2(c.x - 3.0f, c.y + 2.5f), fg);
-            dl->AddBezierQuadratic(ImVec2(c.x + 2.0f, c.y - 4.0f), ImVec2(c.x + 5.5f, c.y), ImVec2(c.x + 2.0f, c.y + 4.0f), fg, 1.6f);
+            float mAnim = st.muteAnim;
+            float mPulse = (mAnim > 0.001f) ? std::sin((1.0f - mAnim) * 3.14159265f) : 0.0f;
+            float recoil = -mPulse * 1.2f;
+
+            // Корпус динамика (базовый прямоугольник + конус рупора)
+            drawTransformedRect(ImVec2(c.x - 6.5f + recoil, c.y - 2.5f), ImVec2(c.x - 3.2f + recoil, c.y + 2.5f), fg, 0.8f);
+            dl->AddTriangleFilled(
+                xform(ImVec2(c.x - 3.2f + recoil, c.y - 2.5f)),
+                xform(ImVec2(c.x - 0.5f + recoil, c.y - 5.5f)),
+                xform(ImVec2(c.x - 0.5f + recoil, c.y + 5.5f)),
+                fg
+            );
+            dl->AddTriangleFilled(
+                xform(ImVec2(c.x - 3.2f + recoil, c.y - 2.5f)),
+                xform(ImVec2(c.x - 0.5f + recoil, c.y + 5.5f)),
+                xform(ImVec2(c.x - 3.2f + recoil, c.y + 2.5f)),
+                fg
+            );
+
+            // Динамические звуковые волны (1, 2 или 3 дуги в зависимости от громкости)
+            float volVal = extraVal;
+            float rip = mPulse * 0.8f;
+
+            // 1-я волна: при громкости > 0%
+            if (volVal > 0.01f) {
+                dl->AddBezierQuadratic(
+                    xform(ImVec2(c.x + 1.8f + rip, c.y - 3.0f)),
+                    xform(ImVec2(c.x + 3.6f + rip, c.y)),
+                    xform(ImVec2(c.x + 1.8f + rip, c.y + 3.0f)),
+                    fg, 1.5f * scale
+                );
+            }
+            // 2-я волна: при громкости > 33%
+            if (volVal > 0.33f) {
+                dl->AddBezierQuadratic(
+                    xform(ImVec2(c.x + 3.8f + rip * 1.3f, c.y - 4.8f)),
+                    xform(ImVec2(c.x + 6.2f + rip * 1.3f, c.y)),
+                    xform(ImVec2(c.x + 3.8f + rip * 1.3f, c.y + 4.8f)),
+                    fg, 1.5f * scale
+                );
+            }
+            // 3-я волна: при высокой громкости > 66%
+            if (volVal > 0.66f) {
+                dl->AddBezierQuadratic(
+                    xform(ImVec2(c.x + 5.8f + rip * 1.6f, c.y - 6.5f)),
+                    xform(ImVec2(c.x + 8.8f + rip * 1.6f, c.y)),
+                    xform(ImVec2(c.x + 5.8f + rip * 1.6f, c.y + 6.5f)),
+                    fg, 1.5f * scale
+                );
+            }
             break;
         }
         case IconType::Mute: {
-            dl->AddTriangleFilled(ImVec2(c.x - 6.0f, c.y), ImVec2(c.x - 1.0f, c.y - 5.0f), ImVec2(c.x - 1.0f, c.y + 5.0f), fg);
-            dl->AddRectFilled(ImVec2(c.x - 6.5f, c.y - 2.5f), ImVec2(c.x - 3.0f, c.y + 2.5f), fg);
-            dl->AddLine(ImVec2(c.x + 1.5f, c.y - 3.5f), ImVec2(c.x + 6.5f, c.y + 3.5f), fg, 1.8f);
-            dl->AddLine(ImVec2(c.x + 6.5f, c.y - 3.5f), ImVec2(c.x + 1.5f, c.y + 3.5f), fg, 1.8f);
+            float mAnim = st.muteAnim;
+            float mPulse = (mAnim > 0.001f) ? std::sin((1.0f - mAnim) * 3.14159265f) : 0.0f;
+            float recoil = -mPulse * 1.2f;
+
+            // Корпус динамика
+            drawTransformedRect(ImVec2(c.x - 6.5f + recoil, c.y - 2.5f), ImVec2(c.x - 3.2f + recoil, c.y + 2.5f), fg, 0.8f);
+            dl->AddTriangleFilled(
+                xform(ImVec2(c.x - 3.2f + recoil, c.y - 2.5f)),
+                xform(ImVec2(c.x - 0.5f + recoil, c.y - 5.5f)),
+                xform(ImVec2(c.x - 0.5f + recoil, c.y + 5.5f)),
+                fg
+            );
+            dl->AddTriangleFilled(
+                xform(ImVec2(c.x - 3.2f + recoil, c.y - 2.5f)),
+                xform(ImVec2(c.x - 0.5f + recoil, c.y + 5.5f)),
+                xform(ImVec2(c.x - 3.2f + recoil, c.y + 2.5f)),
+                fg
+            );
+
+            // Чёткий аккуратный крестик (mute 'x')
+            float xSz = 2.4f * (1.0f + mPulse * 0.25f);
+            float xMid = c.x + 4.2f;
+            dl->AddLine(xform(ImVec2(xMid - xSz, c.y - xSz)), xform(ImVec2(xMid + xSz, c.y + xSz)), fg, 1.7f * scale);
+            dl->AddLine(xform(ImVec2(xMid + xSz, c.y - xSz)), xform(ImVec2(xMid - xSz, c.y + xSz)), fg, 1.7f * scale);
             break;
         }
         case IconType::Dice: {
-            dl->AddRect(ImVec2(c.x - 7.0f, c.y - 7.0f), ImVec2(c.x + 7.0f, c.y + 7.0f), fg, 3.0f, 0, 1.8f);
-            dl->AddCircleFilled(ImVec2(c.x - 3.2f, c.y - 3.2f), 1.35f, fg);
-            dl->AddCircleFilled(ImVec2(c.x + 3.2f, c.y - 3.2f), 1.35f, fg);
-            dl->AddCircleFilled(ImVec2(c.x,        c.y),        1.35f, fg);
-            dl->AddCircleFilled(ImVec2(c.x - 3.2f, c.y + 3.2f), 1.35f, fg);
-            dl->AddCircleFilled(ImVec2(c.x + 3.2f, c.y + 3.2f), 1.35f, fg);
+            drawTransformedRectStroke(ImVec2(c.x - 7.0f, c.y - 7.0f), ImVec2(c.x + 7.0f, c.y + 7.0f), fg, 3.0f, 1.8f);
+
+            // Определение грани кости (при подбрасывании грани динамично сменяются в воздухе)
+            int pipFace = 5;
+            if (st.diceToss > 0.001f) {
+                float p = 1.0f - st.diceToss;
+                if (p < 0.82f) {
+                    int phase = static_cast<int>(p * 18.0f) % 4;
+                    if (phase == 0) pipFace = 2;
+                    else if (phase == 1) pipFace = 4;
+                    else if (phase == 2) pipFace = 3;
+                    else pipFace = 6;
+                }
+            }
+
+            auto drawDot = [&](float dx, float dy) {
+                dl->AddCircleFilled(xform(ImVec2(c.x + dx, c.y + dy)), 1.35f * scale, fg);
+            };
+
+            if (pipFace == 1 || pipFace == 3 || pipFace == 5) {
+                drawDot(0.0f, 0.0f);
+            }
+            if (pipFace >= 2) {
+                drawDot( 3.2f, -3.2f);
+                drawDot(-3.2f,  3.2f);
+            }
+            if (pipFace >= 4) {
+                drawDot(-3.2f, -3.2f);
+                drawDot( 3.2f,  3.2f);
+            }
+            if (pipFace == 6) {
+                drawDot(-3.2f,  0.0f);
+                drawDot( 3.2f,  0.0f);
+            }
             break;
         }
         case IconType::Lyrics: {
-            // Иконка текста/буклета на обороте бокса (стилизованные строки с акцентной нотой/микрофоном)
-            dl->AddRect(ImVec2(c.x - 6.5f, c.y - 7.0f), ImVec2(c.x + 6.5f, c.y + 7.0f), fg, 2.2f, 0, 1.6f);
-            dl->AddLine(ImVec2(c.x - 3.5f, c.y - 3.2f), ImVec2(c.x + 3.5f, c.y - 3.2f), fg, 1.6f);
-            dl->AddLine(ImVec2(c.x - 3.5f, c.y + 0.0f), ImVec2(c.x + 2.0f, c.y + 0.0f), fg, 1.6f);
-            dl->AddLine(ImVec2(c.x - 3.5f, c.y + 3.2f), ImVec2(c.x + 3.5f, c.y + 3.2f), fg, 1.6f);
+            drawTransformedRectStroke(ImVec2(c.x - 6.5f, c.y - 7.0f), ImVec2(c.x + 6.5f, c.y + 7.0f), fg, 2.2f, 1.6f);
+            dl->AddLine(xform(ImVec2(c.x - 3.5f, c.y - 3.2f)), xform(ImVec2(c.x + 3.5f, c.y - 3.2f)), fg, 1.6f * scale);
+            dl->AddLine(xform(ImVec2(c.x - 3.5f, c.y + 0.0f)), xform(ImVec2(c.x + 2.0f, c.y + 0.0f)), fg, 1.6f * scale);
+            dl->AddLine(xform(ImVec2(c.x - 3.5f, c.y + 3.2f)), xform(ImVec2(c.x + 3.5f, c.y + 3.2f)), fg, 1.6f * scale);
+            break;
+        }
+        case IconType::Settings: {
+            float rOuter = 5.2f;
+            float rInner = 2.4f;
+            dl->AddCircle(c, rOuter * scale, fg, 20, 1.6f * scale);
+            dl->AddCircleFilled(c, rInner * scale, ImColor(ImVec4(accent.x, accent.y, accent.z, (activeState ? 0.95f : 0.35f) * alpha)), 16);
+
+            for (int k = 0; k < 6; ++k) {
+                float toothAngle = k * (3.14159265f / 3.0f);
+                float ct = std::cos(toothAngle);
+                float stA = std::sin(toothAngle);
+                ImVec2 tBase(c.x + ct * (rOuter - 0.5f), c.y + stA * (rOuter - 0.5f));
+                ImVec2 tTip (c.x + ct * (rOuter + 2.6f), c.y + stA * (rOuter + 2.6f));
+                dl->AddLine(xform(tBase), xform(tTip), fg, 2.4f * scale);
+            }
             break;
         }
         case IconType::Minimize: {
-            dl->AddLine(ImVec2(c.x - 5.5f, c.y + 1.0f), ImVec2(c.x + 5.5f, c.y + 1.0f), fg, 1.8f);
+            dl->AddLine(xform(ImVec2(c.x - 5.5f, c.y + 1.0f)), xform(ImVec2(c.x + 5.5f, c.y + 1.0f)), fg, 1.8f * scale);
             break;
         }
         case IconType::Maximize: {
-            dl->AddRect(ImVec2(c.x - 5.0f, c.y - 5.0f), ImVec2(c.x + 5.0f, c.y + 5.0f), fg, 1.5f, 0, 1.6f);
+            drawTransformedRectStroke(ImVec2(c.x - 5.0f, c.y - 5.0f), ImVec2(c.x + 5.0f, c.y + 5.0f), fg, 1.5f, 1.6f);
             break;
         }
         case IconType::Restore: {
-            dl->AddRect(ImVec2(c.x - 3.0f, c.y - 5.5f), ImVec2(c.x + 5.5f, c.y + 3.0f), fg, 1.2f, 0, 1.5f);
-            dl->AddRect(ImVec2(c.x - 5.5f, c.y - 3.0f), ImVec2(c.x + 3.0f, c.y + 5.5f), fg, 1.2f, 0, 1.5f);
+            drawTransformedRectStroke(ImVec2(c.x - 3.0f, c.y - 5.5f), ImVec2(c.x + 5.5f, c.y + 3.0f), fg, 1.2f, 1.5f);
+            drawTransformedRectStroke(ImVec2(c.x - 5.5f, c.y - 3.0f), ImVec2(c.x + 3.0f, c.y + 5.5f), fg, 1.2f, 1.5f);
             break;
         }
         case IconType::CloseWin: {
-            dl->AddLine(ImVec2(c.x - 5.0f, c.y - 5.0f), ImVec2(c.x + 5.0f, c.y + 5.0f), fg, 1.8f);
-            dl->AddLine(ImVec2(c.x + 5.0f, c.y - 5.0f), ImVec2(c.x - 5.0f, c.y + 5.0f), fg, 1.8f);
+            dl->AddLine(xform(ImVec2(c.x - 5.0f, c.y - 5.0f)), xform(ImVec2(c.x + 5.0f, c.y + 5.0f)), fg, 1.8f * scale);
+            dl->AddLine(xform(ImVec2(c.x + 5.0f, c.y - 5.0f)), xform(ImVec2(c.x - 5.0f, c.y + 5.0f)), fg, 1.8f * scale);
             break;
         }
     }
@@ -1122,8 +1574,8 @@ static void renderDebugOverlay(bool isActivelyAnimating, const glm::vec3& accent
         ImGui::TextColored(ImVec4(0.65f, 0.70f, 0.80f, 1.0f), "Режим:");
         ImGui::SameLine(92.0f);
         if (isActivelyAnimating) {
-            ImGui::TextColored(ImVec4(0.20f, 0.90f, 0.55f, 1.0f), "100 FPS (Активен)");
-        } else if (g_lyricsInspectMode) {
+            ImGui::TextColored(ImVec4(0.20f, 0.90f, 0.55f, 1.0f), "120 FPS (Активен)");
+        } else if (g_lyricsInspectMode || g_showSettingsWindow) {
             ImGui::TextColored(ImVec4(0.35f, 0.78f, 1.0f, 1.0f), "60 FPS (Текст)");
         } else {
             ImGui::TextColored(ImVec4(0.50f, 0.65f, 0.85f, 1.0f), "30 FPS (Покой)");
@@ -1185,6 +1637,9 @@ int main() {
     if (GLFWmonitor* primary = glfwGetPrimaryMonitor()) {
         if (const GLFWvidmode* mode = glfwGetVideoMode(primary)) {
             glfwSetWindowPos(window, (mode->width - 1380) / 2, (mode->height - 800) / 2);
+            if (mode->refreshRate > 0) {
+                g_monitorRefreshRate = mode->refreshRate;
+            }
         }
     }
 
@@ -1231,12 +1686,27 @@ int main() {
         const char* bPath = fs::exists(fontBoldPath) ? fontBoldPath : fontPath;
         const char* sbPath = fs::exists(fontSemiboldPath) ? fontSemiboldPath : bPath;
 
+        // Базовые шрифты (оконный режим ~800p)
         g_fontMain = io.Fonts->AddFontFromFileTTF(fontPath, 16.0f, nullptr, glyphRanges.Data);
         g_fontMainBold = io.Fonts->AddFontFromFileTTF(bPath, 16.0f, nullptr, glyphRanges.Data);
         g_fontTitleBold = io.Fonts->AddFontFromFileTTF(bPath, 23.0f, nullptr, glyphRanges.Data);
         g_fontArtistMedium = io.Fonts->AddFontFromFileTTF(sbPath, 17.0f, nullptr, glyphRanges.Data);
-        g_fontLyricsRegular = io.Fonts->AddFontFromFileTTF(fontPath, 22.0f, nullptr, glyphRanges.Data);
-        g_fontKaraokeBold = io.Fonts->AddFontFromFileTTF(bPath, 27.0f, nullptr, glyphRanges.Data);
+        g_fontLyricsRegular = io.Fonts->AddFontFromFileTTF(fontPath, 24.0f, nullptr, glyphRanges.Data);
+        g_fontKaraokeBold = io.Fonts->AddFontFromFileTTF(bPath, 30.0f, nullptr, glyphRanges.Data);
+
+        // Средние шрифты (1080p Fullscreen)
+        g_fontMainMed = io.Fonts->AddFontFromFileTTF(fontPath, 19.0f, nullptr, glyphRanges.Data);
+        g_fontTitleMed = io.Fonts->AddFontFromFileTTF(bPath, 28.0f, nullptr, glyphRanges.Data);
+        g_fontArtistMed = io.Fonts->AddFontFromFileTTF(sbPath, 20.0f, nullptr, glyphRanges.Data);
+        g_fontLyricsMed = io.Fonts->AddFontFromFileTTF(fontPath, 29.0f, nullptr, glyphRanges.Data);
+        g_fontKaraokeMed = io.Fonts->AddFontFromFileTTF(bPath, 37.0f, nullptr, glyphRanges.Data);
+
+        // Крупные шрифты (1440p / 2560x1440 и 4K Fullscreen)
+        g_fontMainLarge = io.Fonts->AddFontFromFileTTF(fontPath, 22.0f, nullptr, glyphRanges.Data);
+        g_fontTitleLarge = io.Fonts->AddFontFromFileTTF(bPath, 34.0f, nullptr, glyphRanges.Data);
+        g_fontArtistLarge = io.Fonts->AddFontFromFileTTF(sbPath, 24.0f, nullptr, glyphRanges.Data);
+        g_fontLyricsLarge = io.Fonts->AddFontFromFileTTF(fontPath, 35.0f, nullptr, glyphRanges.Data);
+        g_fontKaraokeLarge = io.Fonts->AddFontFromFileTTF(bPath, 45.0f, nullptr, glyphRanges.Data);
     } else {
         g_fontMain = io.Fonts->AddFontDefault();
         g_fontMainBold = g_fontMain;
@@ -1244,12 +1714,26 @@ int main() {
         g_fontArtistMedium = g_fontMain;
         g_fontLyricsRegular = g_fontMain;
         g_fontKaraokeBold = g_fontMain;
+
+        g_fontMainMed = g_fontMain;
+        g_fontTitleMed = g_fontMain;
+        g_fontArtistMed = g_fontMain;
+        g_fontLyricsMed = g_fontMain;
+        g_fontKaraokeMed = g_fontMain;
+
+        g_fontMainLarge = g_fontMain;
+        g_fontTitleLarge = g_fontMain;
+        g_fontArtistLarge = g_fontMain;
+        g_fontLyricsLarge = g_fontMain;
+        g_fontKaraokeLarge = g_fontMain;
     }
 
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 22.0f;
     style.FrameRounding = 12.0f;
     style.GrabRounding = 8.0f;
+    style.PopupRounding = 16.0f;
+    style.PopupBorderSize = 1.0f;
     style.WindowBorderSize = 1.0f;
     style.FrameBorderSize = 0.0f;
     style.ItemSpacing = ImVec2(8, 6);
@@ -1686,13 +2170,26 @@ int main() {
         }
 
         bool isScrolling = false;
-        float diffScroll = 0.0f;
         if (!g_visibleIndices.empty()) {
             float maxScroll = (std::max)(0.0f, (static_cast<float>(g_visibleIndices.size()) - 1.0f) * kSpacing);
-            g_targetScroll = std::clamp(g_targetScroll, -0.35f, maxScroll + 0.35f);
-            diffScroll = g_targetScroll - g_shelfScroll;
-            if (std::abs(diffScroll) > 0.0002f) {
-                g_shelfScroll += diffScroll * std::min(1.0f, 18.0f * dt);
+            const float overscroll = kSpacing * 1.5f;
+            g_targetScroll = std::clamp(g_targetScroll, -overscroll, maxScroll + overscroll);
+
+            // Мягкий возврат (rubber band / spring back) при выходе за пределы крайних обложек
+            if (g_targetScroll < 0.0f) {
+                float returnAlpha = 1.0f - std::exp(-10.0f * dt);
+                g_targetScroll += (0.0f - g_targetScroll) * returnAlpha;
+            } else if (g_targetScroll > maxScroll) {
+                float returnAlpha = 1.0f - std::exp(-10.0f * dt);
+                g_targetScroll += (maxScroll - g_targetScroll) * returnAlpha;
+            }
+
+            float diffScroll = g_targetScroll - g_shelfScroll;
+            if (std::abs(diffScroll) > 0.0001f) {
+                // Высокоточная экспоненциальная интерполяция: абсолютно бархатный ход полки при любой скорости вращения колеса,
+                // нулевой рывок (zero jerk), отсутствие ступенчатости и полная независимость от частоты кадров
+                float alpha = 1.0f - std::exp(-13.5f * dt);
+                g_shelfScroll += diffScroll * alpha;
                 isScrolling = true;
                 lastActiveTime = now;
             } else {
@@ -1709,6 +2206,8 @@ int main() {
             hoverIndex = -1;
             cachedPickIndex = -1;
         } else if (mouseMoved || isScrolling || !g_pendingLoadQueue.empty()) {
+            // Во время пролистывания полки обложки непрерывно реагируют на курсор:
+            // Луч проверяется каждый кадр движения, обеспечивая живой тактильный отклик
             cachedPickIndex = renderer.pickTrack(mouseX, mouseY, g_visibleIndices, g_hoverWeights, g_shelfScroll);
             hoverIndex = cachedPickIndex;
         } else {
@@ -1717,10 +2216,12 @@ int main() {
 
         for (size_t i = 0; i < g_hoverWeights.size(); ++i) {
             float targetW = (static_cast<int>(i) == hoverIndex) ? 1.0f : 0.0f;
+            if (g_hoverWeights[i] == targetW) continue;
             float diffW = targetW - g_hoverWeights[i];
             if (std::abs(diffW) > 0.001f) {
-                float speed = g_roulette.active ? 18.0f : 13.0f;
-                g_hoverWeights[i] += diffW * std::min(1.0f, speed * dt);
+                float speed = g_roulette.active ? 18.0f : 14.0f;
+                float alpha = 1.0f - std::exp(-speed * dt);
+                g_hoverWeights[i] += diffW * alpha;
                 lastActiveTime = now;
             } else {
                 g_hoverWeights[i] = targetW;
@@ -1742,7 +2243,7 @@ int main() {
         glm::vec3 targetAccent = (accentSourceIdx >= 0 && accentSourceIdx < static_cast<int>(g_playlist.size()))
             ? g_playlist[accentSourceIdx].accentColor
             : glm::vec3(0.95f, 0.26f, 0.42f);
-        currentThemeAccent += (targetAccent - currentThemeAccent) * std::min(1.0f, 6.0f * dt);
+        currentThemeAccent = renderer.getCurrentAccent();
 
         float targetHud = (!g_playlist.empty()) ? 1.0f : 0.0f;
         hudAlpha += (targetHud - hudAlpha) * std::min(1.0f, 9.0f * dt);
@@ -1775,7 +2276,7 @@ int main() {
         renderer.renderShelf(g_playlist, g_visibleIndices, g_hoverWeights, g_shelfScroll,
                              g_selectedTrack, g_activePlayingTrack, rouletteHi,
                              discFlightProgress, g_inspectProgress, g_inspectFrontFlip,
-                             static_cast<float>(now), currentThemeAccent);
+                             static_cast<float>(now), targetAccent);
 
         io.FontDefault = (g_boldInterfaceFont && g_fontMainBold) ? g_fontMainBold : g_fontMain;
         ImGui_ImplOpenGL3_NewFrame();
@@ -1917,7 +2418,9 @@ int main() {
 
             // Закрыть / сброс: Escape
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                if (g_lyricsInspectMode) {
+                if (g_showSettingsWindow) {
+                    g_showSettingsWindow = false;
+                } else if (g_lyricsInspectMode) {
                     g_lyricsInspectMode = false;
                 } else if (g_searchQuery[0] != '\0') {
                     g_searchQuery[0] = '\0';
@@ -1943,6 +2446,25 @@ int main() {
             if (backAlpha > 0.02f && boxW > 120.0f && boxH > 120.0f) {
                 LyricsResult lyr = g_lyricsFetcher.getLyrics(curTrack.widePath);
 
+                // Определение масштаба: 0 = стандарт (оконный ~800p), 1 = средний (1080p), 2 = крупный (1440p QHD / 4K)
+                int scaleTier = 0;
+                if (boxH >= 860.0f) {
+                    scaleTier = 2;
+                } else if (boxH >= 650.0f) {
+                    scaleTier = 1;
+                }
+
+                ImFont* fontBase = (scaleTier == 2 && g_fontMainLarge) ? g_fontMainLarge :
+                                   (scaleTier == 1 && g_fontMainMed) ? g_fontMainMed : g_fontMain;
+                ImFont* fontTitle = (scaleTier == 2 && g_fontTitleLarge) ? g_fontTitleLarge :
+                                    (scaleTier == 1 && g_fontTitleMed) ? g_fontTitleMed : g_fontTitleBold;
+                ImFont* fontArtist = (scaleTier == 2 && g_fontArtistLarge) ? g_fontArtistLarge :
+                                     (scaleTier == 1 && g_fontArtistMed) ? g_fontArtistMed : g_fontArtistMedium;
+                ImFont* fontLyrics = (scaleTier == 2 && g_fontLyricsLarge) ? g_fontLyricsLarge :
+                                     (scaleTier == 1 && g_fontLyricsMed) ? g_fontLyricsMed : g_fontLyricsRegular;
+                ImFont* fontKaraoke = (scaleTier == 2 && g_fontKaraokeLarge) ? g_fontKaraokeLarge :
+                                      (scaleTier == 1 && g_fontKaraokeMed) ? g_fontKaraokeMed : g_fontKaraokeBold;
+
                 ImGui::SetNextWindowPos(ImVec2(boxRect.x, boxRect.y), ImGuiCond_Always);
                 ImGui::SetNextWindowSize(ImVec2(boxW, boxH), ImGuiCond_Always);
 
@@ -1956,13 +2478,15 @@ int main() {
                 ImGui::Begin("##BackOfBoxLyricsSurface", nullptr,
                              ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
-                if (g_fontMain) ImGui::PushFont(g_fontMain);
+                if (fontBase) ImGui::PushFont(fontBase);
 
                 ImDrawList* bdl = ImGui::GetWindowDrawList();
                 ImVec2 wp = ImGui::GetWindowPos();
 
+                float hdrGradH = (scaleTier == 2) ? 96.0f : ((scaleTier == 1) ? 82.0f : 68.0f);
+                float padX = (scaleTier == 2) ? 22.0f : ((scaleTier == 1) ? 18.0f : 16.0f);
+
                 // Полупрозрачная затемнённая подложка-градиент под шапкой
-                float hdrGradH = 68.0f;
                 bdl->AddRectFilledMultiColor(
                     ImVec2(wp.x, wp.y),
                     ImVec2(wp.x + boxW, wp.y + hdrGradH),
@@ -1973,8 +2497,8 @@ int main() {
                 );
                 // Тонкая акцентная линия-разделитель под шапкой
                 bdl->AddLine(
-                    ImVec2(wp.x + 16.0f, wp.y + hdrGradH),
-                    ImVec2(wp.x + boxW - 16.0f, wp.y + hdrGradH),
+                    ImVec2(wp.x + padX, wp.y + hdrGradH),
+                    ImVec2(wp.x + boxW - padX, wp.y + hdrGradH),
                     ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.28f * backAlpha),
                     1.0f
                 );
@@ -1982,19 +2506,22 @@ int main() {
                 // Верхняя шапка заднего вкладыша: номер трека, название, артист
                 char trkNumBuf[32];
                 std::snprintf(trkNumBuf, sizeof(trkNumBuf), "TRACK %02d", displayTrackIdx + 1);
+                float trkNumY = (scaleTier == 2) ? 9.0f : ((scaleTier == 1) ? 8.0f : 7.0f);
                 bdl->AddText(
-                    ImVec2(wp.x + 18.0f, wp.y + 7.0f),
+                    ImVec2(wp.x + padX + 2.0f, wp.y + trkNumY),
                     ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.90f * backAlpha),
                     trkNumBuf
                 );
 
-                std::string hdrTitle = truncateUtf8(curTrack.title, 24);
-                std::string hdrArtist = truncateUtf8(curTrack.artist, 28);
+                int maxTitleLen = (boxW > 950.0f) ? 48 : ((boxW > 680.0f) ? 36 : 24);
+                int maxArtistLen = (boxW > 950.0f) ? 54 : ((boxW > 680.0f) ? 40 : 28);
+                std::string hdrTitle = truncateUtf8(curTrack.title, maxTitleLen);
+                std::string hdrArtist = truncateUtf8(curTrack.artist, maxArtistLen);
 
                 // Кнопка закрытия [X] в правом верхнем углу прямо на карте
-                float btnSz = 24.0f;
-                float closeBtnX = boxW - btnSz - 12.0f;
-                float btnY = 10.0f;
+                float btnSz = (scaleTier == 2) ? 30.0f : ((scaleTier == 1) ? 26.0f : 24.0f);
+                float closeBtnX = boxW - btnSz - (scaleTier == 2 ? 16.0f : 12.0f);
+                float btnY = (scaleTier == 2) ? 12.0f : ((scaleTier == 1) ? 11.0f : 10.0f);
                 ImGui::SetCursorPos(ImVec2(closeBtnX, btnY));
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f * backAlpha));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.88f, 0.22f, 0.28f, 0.85f * backAlpha));
@@ -2019,68 +2546,69 @@ int main() {
                 // Бейдж режима (KARAOKE • LRCLIB / TEXT • GENIUS)
                 std::string badgeStr = lyr.sourceBadge.empty() ? "LYRICS" : lyr.sourceBadge;
                 ImVec2 bSz = ImGui::CalcTextSize(badgeStr.c_str());
-                float pillW = bSz.x + 22.0f;
-                float pillH = 22.0f;
-                float pillX = retryBtnX - pillW - 8.0f;
-                float pillY = 11.0f;
+                float pillW = bSz.x + (scaleTier == 2 ? 28.0f : 22.0f);
+                float pillH = (scaleTier == 2) ? 28.0f : ((scaleTier == 1) ? 24.0f : 22.0f);
+                float pillX = retryBtnX - pillW - (scaleTier == 2 ? 10.0f : 8.0f);
+                float pillY = btnY + (btnSz - pillH) * 0.5f;
 
                 ImVec4 pillBg = (lyr.status == LyricsStatus::FoundSynced)
                     ? ImVec4(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.22f * backAlpha)
                     : ImVec4(1.0f, 1.0f, 1.0f, 0.08f * backAlpha);
                 bdl->AddRectFilled(ImVec2(wp.x + pillX, wp.y + pillY),
                                    ImVec2(wp.x + pillX + pillW, wp.y + pillY + pillH),
-                                   ImColor(pillBg), 11.0f);
+                                   ImColor(pillBg), pillH * 0.5f);
                 bdl->AddRect(ImVec2(wp.x + pillX, wp.y + pillY),
                              ImVec2(wp.x + pillX + pillW, wp.y + pillY + pillH),
-                             ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.55f * backAlpha), 11.0f);
+                             ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.55f * backAlpha), pillH * 0.5f);
 
                 // Пульсирующая точка синхронизации караоке
                 if (lyr.status == LyricsStatus::FoundSynced) {
                     float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(now) * 5.0f);
+                    float dotRadius = (scaleTier == 2) ? 3.5f : 3.0f;
+                    float dotX = wp.x + pillX + (scaleTier == 2 ? 12.0f : 9.0f);
                     bdl->AddCircleFilled(
-                        ImVec2(wp.x + pillX + 9.0f, wp.y + pillY + pillH * 0.5f),
-                        3.0f,
+                        ImVec2(dotX, wp.y + pillY + pillH * 0.5f),
+                        dotRadius,
                         ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, (0.6f + 0.4f * pulse) * backAlpha)
                     );
                 }
 
-                ImGui::SetCursorPos(ImVec2(pillX + (lyr.status == LyricsStatus::FoundSynced ? 16.0f : 10.0f), pillY + (pillH - bSz.y) * 0.5f));
+                ImGui::SetCursorPos(ImVec2(pillX + (lyr.status == LyricsStatus::FoundSynced ? (scaleTier == 2 ? 20.0f : 16.0f) : 10.0f), pillY + (pillH - bSz.y) * 0.5f));
                 ImGui::TextColored(ImVec4(0.96f, 0.98f, 1.0f, backAlpha), "%s", badgeStr.c_str());
 
-                // Крупный заголовок трека (23px bold) с тенью
-                if (g_fontTitleBold) ImGui::PushFont(g_fontTitleBold);
-                ImGui::SetCursorPos(ImVec2(19.0f, 22.0f));
-                ImGui::TextColored(ImVec4(0.01f, 0.02f, 0.04f, 0.70f * backAlpha), "%s", hdrTitle.c_str());
-                ImGui::SetCursorPos(ImVec2(18.0f, 21.0f));
-                ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, backAlpha), "%s", hdrTitle.c_str());
-                if (g_fontTitleBold) ImGui::PopFont();
+                // Заголовок трека с тенью
+                float titleY = (scaleTier == 2) ? 28.0f : ((scaleTier == 1) ? 24.0f : 21.0f);
+                float artistY = (scaleTier == 2) ? 66.0f : ((scaleTier == 1) ? 54.0f : 45.0f);
+                float titleX = padX + 2.0f;
 
-                // Исполнитель (17px medium)
-                if (g_fontArtistMedium) ImGui::PushFont(g_fontArtistMedium);
-                ImGui::SetCursorPos(ImVec2(19.0f, 46.0f));
+                if (fontTitle) ImGui::PushFont(fontTitle);
+                ImGui::SetCursorPos(ImVec2(titleX + 1.0f, titleY + 1.0f));
+                ImGui::TextColored(ImVec4(0.01f, 0.02f, 0.04f, 0.70f * backAlpha), "%s", hdrTitle.c_str());
+                ImGui::SetCursorPos(ImVec2(titleX, titleY));
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, backAlpha), "%s", hdrTitle.c_str());
+                if (fontTitle) ImGui::PopFont();
+
+                // Исполнитель
+                if (fontArtist) ImGui::PushFont(fontArtist);
+                ImGui::SetCursorPos(ImVec2(titleX + 1.0f, artistY + 1.0f));
                 ImGui::TextColored(ImVec4(0.01f, 0.02f, 0.04f, 0.50f * backAlpha), "%s", hdrArtist.c_str());
-                ImGui::SetCursorPos(ImVec2(18.0f, 45.0f));
+                ImGui::SetCursorPos(ImVec2(titleX, artistY));
                 ImGui::TextColored(ImVec4(0.78f, 0.83f, 0.92f, 0.95f * backAlpha), "%s", hdrArtist.c_str());
-                if (g_fontArtistMedium) ImGui::PopFont();
+                if (fontArtist) ImGui::PopFont();
 
                 // Область прокрутки текста на задней крышке бокса
-                float contentTop = 72.0f;
-                float footerH = 34.0f;
+                float contentTop = (scaleTier == 2) ? 104.0f : ((scaleTier == 1) ? 88.0f : 72.0f);
+                float footerH = (scaleTier == 2) ? 44.0f : ((scaleTier == 1) ? 38.0f : 34.0f);
                 float contentH = boxH - contentTop - footerH;
 
                 // Аккуратная полупрозрачная подложка под текст для идеальной читаемости
-                float platePadX = 14.0f;
+                float platePadX = (scaleTier == 2) ? 20.0f : ((scaleTier == 1) ? 16.0f : 14.0f);
                 float plateTop = contentTop - 4.0f;
                 float plateBottom = boxH - footerH + 4.0f;
                 ImVec2 plateMin(wp.x + platePadX, wp.y + plateTop);
                 ImVec2 plateMax(wp.x + boxW - platePadX, wp.y + plateBottom);
-                float plateRounding = 14.0f;
+                float plateRounding = (scaleTier == 2) ? 18.0f : 14.0f;
 
-                // Параметр прозрачности подложки: 
-                // 0.0f — полностью прозрачная (видна только обложка)
-                // 0.30f — лёгкая воздушная тонировка (арт обложки отлично виден)
-                // 0.62f — сбалансированный вариант (матовое стекло)
-                // 0.85f — плотная контрастная подложка
                 const float plateOpacity = 0.30f;
 
                 // 1. Мягкая объёмная тень подложки
@@ -2127,31 +2655,33 @@ int main() {
                     1.0f
                 );
 
-                ImGui::SetCursorPos(ImVec2(14.0f, contentTop));
+                ImGui::SetCursorPos(ImVec2(platePadX, contentTop));
 
-                ImGui::BeginChild("##LyricsScrollRegion", ImVec2(boxW - 28.0f, contentH), false, ImGuiWindowFlags_NoScrollbar);
+                ImGui::BeginChild("##LyricsScrollRegion", ImVec2(boxW - platePadX * 2.0f, contentH), false, ImGuiWindowFlags_NoScrollbar);
                 float regionW = ImGui::GetWindowWidth() - 16.0f;
 
                 if (lyr.status == LyricsStatus::Loading) {
                     lastActiveTime = now;
                     float midY = contentH * 0.42f;
                     const char* loadMsg = "Автопоиск текста (LRCLIB / Genius)...";
-                    if (g_fontLyricsRegular) ImGui::PushFont(g_fontLyricsRegular);
+                    if (fontLyrics) ImGui::PushFont(fontLyrics);
                     ImVec2 mSz = ImGui::CalcTextSize(loadMsg);
                     ImGui::SetCursorPos(ImVec2((regionW - mSz.x) * 0.5f, midY));
                     ImGui::TextColored(ImVec4(0.88f, 0.92f, 0.98f, backAlpha), "%s", loadMsg);
-                    if (g_fontLyricsRegular) ImGui::PopFont();
+                    if (fontLyrics) ImGui::PopFont();
 
                     // Анимированный индикатор волн поиска
                     ImDrawList* cdl = ImGui::GetWindowDrawList();
                     ImVec2 cwp = ImGui::GetWindowPos();
-                    float waveBaseX = cwp.x + regionW * 0.5f - 24.0f;
-                    float waveBaseY = cwp.y + midY + 44.0f;
+                    float waveBaseX = cwp.x + regionW * 0.5f - (scaleTier == 2 ? 34.0f : 24.0f);
+                    float waveBaseY = cwp.y + midY + (scaleTier == 2 ? 56.0f : 44.0f);
+                    float bSpacing = (scaleTier == 2) ? 15.0f : 11.0f;
+                    float bWidth = (scaleTier == 2) ? 7.0f : 5.0f;
                     for (int b = 0; b < 5; ++b) {
-                        float hWave = 6.0f + 12.0f * std::abs(std::sin(static_cast<float>(now) * 6.0f + b * 0.9f));
+                        float hWave = (scaleTier == 2 ? 8.0f : 6.0f) + (scaleTier == 2 ? 16.0f : 12.0f) * std::abs(std::sin(static_cast<float>(now) * 6.0f + b * 0.9f));
                         cdl->AddRectFilled(
-                            ImVec2(waveBaseX + b * 11.0f, waveBaseY - hWave),
-                            ImVec2(waveBaseX + b * 11.0f + 5.0f, waveBaseY + hWave),
+                            ImVec2(waveBaseX + b * bSpacing, waveBaseY - hWave),
+                            ImVec2(waveBaseX + b * bSpacing + bWidth, waveBaseY + hWave),
                             ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, backAlpha),
                             2.5f
                         );
@@ -2159,11 +2689,11 @@ int main() {
                 } else if (lyr.status == LyricsStatus::NotFound || lyr.status == LyricsStatus::None || lyr.lines.empty()) {
                     float midY = contentH * 0.42f;
                     const char* nfMsg = (lyr.status == LyricsStatus::None) ? "Загрузка информации о тексте..." : "Текст для этого трека не найден";
-                    if (g_fontLyricsRegular) ImGui::PushFont(g_fontLyricsRegular);
+                    if (fontLyrics) ImGui::PushFont(fontLyrics);
                     ImVec2 mSz = ImGui::CalcTextSize(nfMsg);
                     ImGui::SetCursorPos(ImVec2((regionW - mSz.x) * 0.5f, midY));
                     ImGui::TextColored(ImVec4(0.72f, 0.76f, 0.85f, backAlpha), "%s", nfMsg);
-                    if (g_fontLyricsRegular) ImGui::PopFont();
+                    if (fontLyrics) ImGui::PopFont();
                 } else if (lyr.status == LyricsStatus::FoundSynced) {
                     // --- РЕЖИМ КАРАОКЕ С ТАЙМКОДАМИ И КЛИКОМ ДЛЯ ПЕРЕМОТКИ ---
                     float curSec = audio.getPlaybackPosition();
@@ -2183,12 +2713,13 @@ int main() {
                         bool isCurrent = (i == activeIdx);
                         int dist = (activeIdx >= 0) ? std::abs(i - activeIdx) : i;
 
-                        ImFont* curFont = isCurrent ? g_fontKaraokeBold : g_fontLyricsRegular;
+                        ImFont* curFont = isCurrent ? fontKaraoke : fontLyrics;
                         if (curFont) ImGui::PushFont(curFont);
 
                         const std::string& txt = lyr.lines[i].text;
                         ImVec2 wrapSz = ImGui::CalcTextSize(txt.c_str(), nullptr, false, regionW - 24.0f);
-                        float rowH = wrapSz.y + (isCurrent ? 20.0f : 14.0f);
+                        float extraRowPad = (scaleTier == 2) ? (isCurrent ? 28.0f : 20.0f) : ((scaleTier == 1) ? (isCurrent ? 24.0f : 16.0f) : (isCurrent ? 20.0f : 14.0f));
+                        float rowH = wrapSz.y + extraRowPad;
 
                         float rowYStart = ImGui::GetCursorPosY();
                         if (isCurrent) {
@@ -2214,7 +2745,7 @@ int main() {
                             float segDur = std::max(0.4f, nextTime - lyr.lines[i].timeSec);
                             float segProg = std::clamp((curSec - lyr.lines[i].timeSec) / segDur, 0.0f, 1.0f);
 
-                            // Эфирный горизонтальный градиентный ореол за поющей строкой (мягко рассеивается без резких границ)
+                            // Эфирный горизонтальный градиентный ореол за поющей строкой
                             float bloomH = rowH + 6.0f;
                             float bloomY = rowScreenPos.y - 3.0f;
                             float midX = rowScreenPos.x + regionW * 0.5f;
@@ -2240,11 +2771,13 @@ int main() {
                             // Изящная лазерная полоска прогресса строки непосредственно под напечатанным текстом
                             float barW = std::min(wrapSz.x + 12.0f, regionW - 24.0f);
                             float barX = rowScreenPos.x + (regionW - barW) * 0.5f;
-                            float barY = rowScreenPos.y + rowH - 2.0f;
+                            float barThickness = (scaleTier == 2) ? 3.0f : 2.0f;
+                            float dotRadius = (scaleTier == 2) ? 3.5f : 2.5f;
+                            float barY = rowScreenPos.y + rowH - barThickness;
 
                             cdl->AddRectFilled(
                                 ImVec2(barX, barY),
-                                ImVec2(barX + barW, barY + 2.0f),
+                                ImVec2(barX + barW, barY + barThickness),
                                 ImColor(1.0f, 1.0f, 1.0f, 0.12f * backAlpha),
                                 1.0f
                             );
@@ -2252,13 +2785,13 @@ int main() {
                             if (progW > 1.0f) {
                                 cdl->AddRectFilled(
                                     ImVec2(barX, barY),
-                                    ImVec2(barX + progW, barY + 2.0f),
+                                    ImVec2(barX + progW, barY + barThickness),
                                     ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.95f * backAlpha),
                                     1.0f
                                 );
                                 cdl->AddCircleFilled(
-                                    ImVec2(barX + progW, barY + 1.0f),
-                                    2.5f,
+                                    ImVec2(barX + progW, barY + barThickness * 0.5f),
+                                    dotRadius,
                                     ImColor(1.0f, 1.0f, 1.0f, 0.95f * backAlpha)
                                 );
                             }
@@ -2282,13 +2815,14 @@ int main() {
                         float textX = std::max(12.0f, (regionW - wrapSz.x) * 0.5f);
                         float textY = rowYStart + (rowH - wrapSz.y) * 0.5f - (isCurrent ? 2.0f : 0.0f);
 
-                        // Напечатанный текст песни (кристально чёткий рендеринг без размывающего субпиксельного смещения)
+                        // Напечатанный текст песни
                         ImGui::SetCursorPos(ImVec2(textX, textY));
                         ImGui::PushTextWrapPos(regionW - 12.0f);
                         ImGui::TextColored(textCol, "%s", txt.c_str());
                         ImGui::PopTextWrapPos();
 
-                        ImGui::SetCursorPosY(rowYStart + rowH + 4.0f);
+                        float rowGap = (scaleTier == 2) ? 6.0f : 4.0f;
+                        ImGui::SetCursorPosY(rowYStart + rowH + rowGap);
 
                         if (curFont) ImGui::PopFont();
                     }
@@ -2316,9 +2850,9 @@ int main() {
                         bool isSectionHeader = (txt.front() == '[' && txt.back() == ']');
 
                         if (isSectionHeader) {
-                            // Секция-заголовок: крупный жирный шрифт (22px) + акцентная подчёркивающая линия
+                            // Секция-заголовок: крупный жирный шрифт + акцентная подчёркивающая линия
                             ImGui::Dummy(ImVec2(1.0f, 10.0f));
-                            if (g_fontTitleBold) ImGui::PushFont(g_fontTitleBold);
+                            if (fontTitle) ImGui::PushFont(fontTitle);
 
                             ImVec2 wrapSz = ImGui::CalcTextSize(txt.c_str(), nullptr, false, regionW - 20.0f);
                             float textX = std::max(10.0f, (regionW - wrapSz.x) * 0.5f);
@@ -2332,18 +2866,19 @@ int main() {
                             ImVec2 lineStart = ImGui::GetCursorScreenPos();
                             float lineW = std::min(wrapSz.x + 24.0f, regionW - 20.0f);
                             float lineX = lineStart.x + (regionW - lineW) * 0.5f - 8.0f;
+                            float lineThick = (scaleTier == 2) ? 2.0f : 1.5f;
                             cdl->AddLine(
                                 ImVec2(lineX, lineStart.y + 3.0f),
                                 ImVec2(lineX + lineW, lineStart.y + 3.0f),
                                 ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.50f * backAlpha),
-                                1.5f
+                                lineThick
                             );
                             ImGui::Dummy(ImVec2(1.0f, 8.0f));
 
-                            if (g_fontTitleBold) ImGui::PopFont();
+                            if (fontTitle) ImGui::PopFont();
                         } else {
-                            // Обычная строка текста (22px) — чёткая печать по матовой подложке без мыла
-                            if (g_fontLyricsRegular) ImGui::PushFont(g_fontLyricsRegular);
+                            // Обычная строка текста
+                            if (fontLyrics) ImGui::PushFont(fontLyrics);
 
                             ImVec2 wrapSz = ImGui::CalcTextSize(txt.c_str(), nullptr, false, regionW - 20.0f);
                             float textX = std::max(10.0f, (regionW - wrapSz.x) * 0.5f);
@@ -2356,9 +2891,10 @@ int main() {
                             ImGui::TextColored(ImVec4(0.94f, 0.96f, 1.0f, 0.95f * backAlpha), "%s", txt.c_str());
                             ImGui::PopTextWrapPos();
 
-                            ImGui::SetCursorPosY(shadowY + wrapSz.y + 4.0f);
+                            float rowGap = (scaleTier == 2) ? 6.0f : 4.0f;
+                            ImGui::SetCursorPosY(shadowY + wrapSz.y + rowGap);
 
-                            if (g_fontLyricsRegular) ImGui::PopFont();
+                            if (fontLyrics) ImGui::PopFont();
                         }
                     }
                     ImGui::Dummy(ImVec2(1.0f, 20.0f));
@@ -2367,7 +2903,7 @@ int main() {
                 ImGui::EndChild();
 
                 // Градиентные затухания сверху и снизу области прокрутки (растворение в матовую бумагу вкладыша)
-                float fadeH = 26.0f;
+                float fadeH = (scaleTier == 2) ? 38.0f : ((scaleTier == 1) ? 30.0f : 26.0f);
                 float scrollContentTop = wp.y + contentTop;
                 float scrollContentBot = wp.y + contentTop + contentH;
                 // Верхний fade
@@ -2394,8 +2930,8 @@ int main() {
 
                 // Линия-разделитель над футером
                 bdl->AddLine(
-                    ImVec2(wp.x + 16.0f, footerY + 2.0f),
-                    ImVec2(wp.x + boxW - 16.0f, footerY + 2.0f),
+                    ImVec2(wp.x + platePadX, footerY + 2.0f),
+                    ImVec2(wp.x + boxW - platePadX, footerY + 2.0f),
                     ImColor(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.22f * backAlpha),
                     1.0f
                 );
@@ -2411,16 +2947,16 @@ int main() {
                     std::snprintf(timeBuf, sizeof(timeBuf), "COMPACT DISC DIGITAL AUDIO • STEREO");
                 }
                 bdl->AddText(
-                    ImVec2(wp.x + 18.0f, footerY + 9.0f),
+                    ImVec2(wp.x + platePadX + 2.0f, footerY + (scaleTier == 2 ? 12.0f : 9.0f)),
                     ImColor(0.68f, 0.74f, 0.86f, 0.65f * backAlpha),
                     timeBuf
                 );
 
                 // Правая часть: аутентичный процедурный штрих-код (CD Barcode)
-                float bcW = 72.0f;
-                float bcH = 15.0f;
-                float bcX = wp.x + boxW - bcW - 18.0f;
-                float bcY = footerY + 8.0f;
+                float bcW = (scaleTier == 2) ? 96.0f : ((scaleTier == 1) ? 82.0f : 72.0f);
+                float bcH = (scaleTier == 2) ? 19.0f : ((scaleTier == 1) ? 17.0f : 15.0f);
+                float bcX = wp.x + boxW - bcW - platePadX - 2.0f;
+                float bcY = footerY + (scaleTier == 2 ? 10.0f : 8.0f);
 
                 // Светлая подложка под штрихкодом
                 bdl->AddRectFilled(
@@ -2437,8 +2973,10 @@ int main() {
                     2.0f, 1.0f, 1.0f, 2.0f, 1.5f, 2.0f, 1.0f, 1.0f, 2.0f, 1.5f
                 };
                 float curBarX = bcX;
+                float barScale = (scaleTier == 2) ? 1.33f : ((scaleTier == 1) ? 1.14f : 1.0f);
+                float barSpacing = (scaleTier == 2) ? 1.2f : 0.9f;
                 for (size_t b = 0; b < sizeof(s_barPattern)/sizeof(s_barPattern[0]); ++b) {
-                    float wBar = s_barPattern[b];
+                    float wBar = s_barPattern[b] * barScale;
                     if (b % 2 == 0) {
                         bdl->AddRectFilled(
                             ImVec2(curBarX, bcY),
@@ -2446,17 +2984,17 @@ int main() {
                             ImColor(0.05f, 0.05f, 0.08f, 0.85f * backAlpha)
                         );
                     }
-                    curBarX += wBar + 0.9f;
+                    curBarX += wBar + barSpacing;
                     if (curBarX > bcX + bcW) break;
                 }
                 // Цифры под штрихкодом
                 bdl->AddText(
-                    ImVec2(bcX + 2.0f, bcY + bcH - 2.0f),
+                    ImVec2(bcX + 2.0f, bcY + bcH - (scaleTier == 2 ? 1.0f : 2.0f)),
                     ImColor(0.08f, 0.08f, 0.12f, 0.80f * backAlpha),
                     "4 012968 0041"
                 );
 
-                if (g_fontMain) ImGui::PopFont();
+                if (fontBase) ImGui::PopFont();
                 ImGui::End();
                 ImGui::PopStyleColor(6);
             }
@@ -2555,30 +3093,208 @@ int main() {
             const float btnH = 30.0f;
             const float bx = (leftCtrlW - btnW) * 0.5f;
             const float by = (topBarH - btnH) * 0.5f;
-            ImVec4 accCol(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 1.0f);
+            glm::vec3 rAcc = renderer.getAccentAtScreenPos(glm::vec2(25.0f + bx, topBarY + by));
+            ImVec4 accCol(rAcc.r, rAcc.g, rAcc.b, 1.0f);
 
             ImGui::SetCursorPos(ImVec2(bx, by));
             if (IconButton("##TopRouletteBtn", IconType::Dice, ImVec2(btnW, btnH), g_roulette.active, accCol, 1.0f)) {
                 startRandomRoulette(g_visibleIndices, audio, discFlightProgress);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Случайный трек (Рулетка)");
+                ImGui::SetTooltip("Случайный трек");
             }
         }
         ImGui::End();
         ImGui::PopStyleColor(2);
 
+        // Вторая левая капсула: кнопка Настроек (Шестерёнка), прямо под кнопкой рулетки
+        const float setPillY = topBarY + topBarH + 8.0f;
+        ImGui::SetNextWindowPos(ImVec2(18.0f, setPillY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(leftCtrlW, topBarH), ImGuiCond_Always);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.10f, 0.14f, 0.88f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+        ImGui::Begin("##SettingsControlsPill", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoScrollbar);
+        {
+            const float btnW = 32.0f;
+            const float btnH = 30.0f;
+            const float bx = (leftCtrlW - btnW) * 0.5f;
+            const float by = (topBarH - btnH) * 0.5f;
+            glm::vec3 sAcc = renderer.getAccentAtScreenPos(glm::vec2(25.0f + bx, setPillY + by));
+            ImVec4 accCol(sAcc.r, sAcc.g, sAcc.b, 1.0f);
+
+            ImGui::SetCursorPos(ImVec2(bx, by));
+            if (IconButton("##TopSettingsBtn", IconType::Settings, ImVec2(btnW, btnH), g_showSettingsWindow, accCol, 1.0f)) {
+                g_showSettingsWindow = !g_showSettingsWindow;
+                lastActiveTime = now;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Настройки");
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+
+        // Плавная анимация шестерёнки и появления окна настроек
+        {
+            float targetSetProg = g_showSettingsWindow ? 1.0f : 0.0f;
+            float setSpeed = g_showSettingsWindow ? 18.0f : 20.0f;
+            g_settingsAnimProgress += (targetSetProg - g_settingsAnimProgress) * std::min(1.0f, setSpeed * dt);
+            if (!g_showSettingsWindow && g_settingsAnimProgress < 0.005f) {
+                g_settingsAnimProgress = 0.0f;
+            }
+
+            float targetGear = g_showSettingsWindow ? 3.14159265f : 0.0f;
+            g_settingsGearRotation += (targetGear - g_settingsGearRotation) * std::min(1.0f, 18.0f * dt);
+        }
+
+        // ------------------ ПЛАВНО ВСПЛЫВАЮЩЕЕ ОКНО НАСТРОЕК ------------------
+        if (g_settingsAnimProgress > 0.005f) {
+            float setEase = 1.0f - std::pow(1.0f - g_settingsAnimProgress, 3.0f);
+            float setWinW = 350.0f;
+            float setWinH = 195.0f;
+            float startX = 18.0f + leftCtrlW + 10.0f;
+            float curWinX = startX - (1.0f - setEase) * 20.0f;
+            float curWinY = setPillY;
+
+            ImGui::SetNextWindowPos(ImVec2(curWinX, curWinY), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(setWinW, setWinH), ImGuiCond_Always);
+
+            glm::vec3 setAcc = renderer.getAccentAtScreenPos(glm::vec2(curWinX + setWinW * 0.5f, curWinY + setWinH * 0.5f));
+
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 18.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 16.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
+
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.09f, 0.13f, 0.96f * setEase));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(setAcc.r, setAcc.g, setAcc.b, 0.40f * setEase));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.97f, 1.0f, setEase));
+
+            ImGui::Begin("##PlayerSettingsFlyout", nullptr,
+                         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+            {
+                ImDrawList* sdl = ImGui::GetWindowDrawList();
+                ImVec2 swp = ImGui::GetWindowPos();
+
+                // Шапка настроек
+                ImGui::SetCursorPos(ImVec2(18.0f, 14.0f));
+                ImGui::TextColored(ImVec4(setAcc.r, setAcc.g, setAcc.b, setEase), "НАСТРОЙКИ");
+
+                // Кнопка закрытия [X]
+                ImGui::SetCursorPos(ImVec2(setWinW - 32.0f, 10.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.08f * setEase));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.88f, 0.22f, 0.28f, 0.85f * setEase));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.75f, 0.15f, 0.20f, 0.95f * setEase));
+                if (ImGui::Button("X##CloseSettings", ImVec2(22.0f, 22.0f))) {
+                    g_showSettingsWindow = false;
+                    lastActiveTime = now;
+                }
+                ImGui::PopStyleColor(3);
+
+                // Акцентная линия разделителя
+                sdl->AddLine(
+                    ImVec2(swp.x + 16.0f, swp.y + 40.0f),
+                    ImVec2(swp.x + setWinW - 16.0f, swp.y + 40.0f),
+                    ImColor(setAcc.r, setAcc.g, setAcc.b, 0.25f * setEase),
+                    1.0f
+                );
+
+                ImGui::SetCursorPosY(48.0f);
+
+                // 1. Сглаживание (Anti-aliasing)
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, setEase), "Сглаживание сцены:");
+                AAMode curAA = renderer.getAAMode();
+                const float segW = (setWinW - 36.0f - 12.0f) / 3.0f;
+                const float segH = 26.0f;
+
+                auto renderSegBtn = [&](const char* label, const char* id, bool isSel, AAMode targetMode) {
+                    ImVec4 btnBg = isSel
+                        ? ImVec4(setAcc.r, setAcc.g, setAcc.b, 0.85f * setEase)
+                        : ImVec4(1.0f, 1.0f, 1.0f, 0.07f * setEase);
+                    ImVec4 textCol = isSel
+                        ? ImVec4(1.0f, 1.0f, 1.0f, setEase)
+                        : ImVec4(0.78f, 0.82f, 0.90f, 0.85f * setEase);
+
+                    ImGui::PushStyleColor(ImGuiCol_Button, btnBg);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, isSel ? btnBg : ImVec4(setAcc.r, setAcc.g, setAcc.b, 0.35f * setEase));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(setAcc.r, setAcc.g, setAcc.b, 0.95f * setEase));
+                    ImGui::PushStyleColor(ImGuiCol_Text, textCol);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+
+                    if (ImGui::Button(id, ImVec2(segW, segH))) {
+                        renderer.setAAMode(targetMode);
+                        g_savedAAMode = targetMode;
+                        saveSettingsToDisk(audio);
+                        lastActiveTime = now;
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor(4);
+                };
+
+                renderSegBtn("2x MSAA", "2x MSAA##AA_MSAA", curAA == AAMode::MSAA, AAMode::MSAA);
+                ImGui::SameLine(0, 6.0f);
+                renderSegBtn("FXAA", "FXAA##AA_FXAA", curAA == AAMode::FXAA, AAMode::FXAA);
+                ImGui::SameLine(0, 6.0f);
+                renderSegBtn("Выкл", "Выкл##AA_OFF", curAA == AAMode::Off, AAMode::Off);
+
+                ImGui::Spacing();
+
+                // 2. Отражения под боксами
+                bool reflOn = renderer.isReflectionsEnabled();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, setEase), "Отражения под боксами:");
+                ImGui::SameLine(setWinW - 64.0f);
+                if (AnimatedToggle("##ReflToggle", &reflOn, ImVec4(setAcc.r, setAcc.g, setAcc.b, 1.0f), setEase)) {
+                    renderer.setReflectionsEnabled(reflOn);
+                    g_savedReflections = reflOn;
+                    saveSettingsToDisk(audio);
+                    lastActiveTime = now;
+                }
+
+                ImGui::Spacing();
+
+                // 3. Жирный шрифт интерфейса
+                bool boldOn = g_boldInterfaceFont;
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.95f, setEase), "Жирный шрифт интерфейса:");
+                ImGui::SameLine(setWinW - 64.0f);
+                if (AnimatedToggle("##BoldToggle", &boldOn, ImVec4(setAcc.r, setAcc.g, setAcc.b, 1.0f), setEase)) {
+                    g_boldInterfaceFont = boldOn;
+                    saveSettingsToDisk(audio);
+                    lastActiveTime = now;
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleColor(3);
+            ImGui::PopStyleVar(3);
+
+            // Клик снаружи закрывает окно
+            if (ImGui::IsMouseClicked(0)) {
+                ImVec2 m = io.MousePos;
+                bool inSetWin = (m.x >= curWinX && m.x <= curWinX + setWinW && m.y >= curWinY && m.y <= curWinY + setWinH);
+                bool inSetPill = (m.x >= 18.0f && m.x <= 18.0f + leftCtrlW && m.y >= setPillY && m.y <= setPillY + topBarH);
+                if (!inSetWin && !inSetPill) {
+                    g_showSettingsWindow = false;
+                    lastActiveTime = now;
+                }
+            }
+        }
+
         const float topBarW = 820.0f;
         ImGui::SetNextWindowPos(ImVec2((w - topBarW) * 0.5f, topBarY), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(topBarW, topBarH), ImGuiCond_Always);
+
+        glm::vec3 topBarAcc = renderer.getAccentAtScreenPos(glm::vec2(w * 0.5f, topBarY + topBarH * 0.5f));
 
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.10f, 0.14f, 0.90f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.96f, 0.99f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_TextDisabled, ImVec4(0.52f, 0.56f, 0.65f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 0.85f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(currentThemeAccent.r * 0.8f, currentThemeAccent.g * 0.8f, currentThemeAccent.b * 0.8f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(topBarAcc.r, topBarAcc.g, topBarAcc.b, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(topBarAcc.r, topBarAcc.g, topBarAcc.b, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(topBarAcc.r * 0.8f, topBarAcc.g * 0.8f, topBarAcc.b * 0.8f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
 
         float fontH = ImGui::GetFontSize();
@@ -2589,7 +3305,7 @@ int main() {
                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         float curX = 10.0f;
-        ImVec4 accCol(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 1.0f);
+        ImVec4 accCol(topBarAcc.r, topBarAcc.g, topBarAcc.b, 1.0f);
 
         ImGui::SetCursorPos(ImVec2(curX, itemY));
         if (ImGui::Button("+ Файлы", ImVec2(74.0f, itemH))) {
@@ -2883,7 +3599,8 @@ int main() {
             const float btnW = 32.0f;
             const float btnH = 30.0f;
             const float by = (topBarH - btnH) * 0.5f;
-            ImVec4 accCol(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, 1.0f);
+            glm::vec3 winBtnAcc = renderer.getAccentAtScreenPos(glm::vec2(static_cast<float>(w) - 60.0f, by + btnH * 0.5f));
+            ImVec4 accCol(winBtnAcc.r, winBtnAcc.g, winBtnAcc.b, 1.0f);
 
             ImGui::SetCursorPos(ImVec2(9.0f, by));
             if (IconButton("##WinMin", IconType::Minimize, ImVec2(btnW, btnH), false, accCol, 1.0f)) {
@@ -2946,19 +3663,25 @@ int main() {
             const float dockX = (w - dockW) * 0.5f;
             const float dockY = static_cast<float>(h) - dockH - 18.0f + slideY;
 
+            glm::vec3 dockAccent = renderer.getAccentAtScreenPos(glm::vec2(dockX + dockW * 0.5f, dockY + dockH * 0.5f));
             ImVec4 barBgColor(
-                currentThemeAccent.r * 0.14f + 0.06f,
-                currentThemeAccent.g * 0.14f + 0.07f,
-                currentThemeAccent.b * 0.14f + 0.09f,
+                dockAccent.r * 0.14f + 0.06f,
+                dockAccent.g * 0.14f + 0.07f,
+                dockAccent.b * 0.14f + 0.09f,
                 0.92f * hudAlpha
             );
             ImVec4 barBorderColor(
-                currentThemeAccent.r * 0.55f + 0.30f,
-                currentThemeAccent.g * 0.55f + 0.30f,
-                currentThemeAccent.b * 0.55f + 0.30f,
+                dockAccent.r * 0.55f + 0.30f,
+                dockAccent.g * 0.55f + 0.30f,
+                dockAccent.b * 0.55f + 0.30f,
                 0.35f * hudAlpha
             );
-            ImVec4 accentRGBA(currentThemeAccent.r, currentThemeAccent.g, currentThemeAccent.b, hudAlpha);
+            ImVec4 accentRGBA(dockAccent.r, dockAccent.g, dockAccent.b, hudAlpha);
+
+            auto getUICol = [&](float localX, float localY) -> ImVec4 {
+                glm::vec3 c = renderer.getAccentAtScreenPos(glm::vec2(dockX + localX, dockY + localY));
+                return ImVec4(c.r, c.g, c.b, hudAlpha);
+            };
 
             ImGui::SetNextWindowPos(ImVec2(dockX, dockY), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(dockW, dockH), ImGuiCond_Always);
@@ -3016,7 +3739,7 @@ int main() {
                     : 0.22f;
                 float bh = barRatio * (lineH - 3.0f);
                 float bx = eqBase.x + b * 4.2f;
-                dl->AddRectFilled(ImVec2(bx, eqBase.y - bh), ImVec2(bx + 2.8f, eqBase.y), ImColor(accentRGBA), 1.2f);
+                dl->AddRectFilled(ImVec2(bx, eqBase.y - bh), ImVec2(bx + 2.8f, eqBase.y), ImColor(getUICol(textX + b * 4.2f, textStartY)), 1.2f);
             }
 
             std::string safeTitle = truncateUtf8(curTrack.title, 20);
@@ -3038,13 +3761,13 @@ int main() {
             float bx = centerAxisX - totalBtnsW * 0.5f;
 
             ImGui::SetCursorPos(ImVec2(bx, row1CenterY - secBtnSz * 0.5f));
-            if (IconButton("##ShuffleBtn", IconType::Shuffle, ImVec2(secBtnSz, secBtnSz), g_isShuffle, accentRGBA, hudAlpha)) {
+            if (IconButton("##ShuffleBtn", IconType::Shuffle, ImVec2(secBtnSz, secBtnSz), g_isShuffle, getUICol(bx + secBtnSz * 0.5f, row1CenterY), hudAlpha)) {
                 g_isShuffle = !g_isShuffle;
             }
             bx += secBtnSz + btnGap;
 
             ImGui::SetCursorPos(ImVec2(bx, row1CenterY - secBtnSz * 0.5f));
-            if (IconButton("##PrevBtn", IconType::Prev, ImVec2(secBtnSz, secBtnSz), false, accentRGBA, hudAlpha)) {
+            if (IconButton("##PrevBtn", IconType::Prev, ImVec2(secBtnSz, secBtnSz), false, getUICol(bx + secBtnSz * 0.5f, row1CenterY), hudAlpha)) {
                 if (audio.getPlaybackPosition() > 3.0f) {
                     audio.seekTo(0.0f);
                 } else {
@@ -3060,7 +3783,7 @@ int main() {
 
             ImGui::SetCursorPos(ImVec2(bx, row1CenterY - mainBtnSz * 0.5f));
             IconType playIcon = audio.isPlaying() ? IconType::Pause : IconType::Play;
-            if (IconButton("##PlayPauseBtn", playIcon, ImVec2(mainBtnSz, mainBtnSz), false, accentRGBA, hudAlpha, true)) {
+            if (IconButton("##PlayPauseBtn", playIcon, ImVec2(mainBtnSz, mainBtnSz), false, getUICol(bx + mainBtnSz * 0.5f, row1CenterY), hudAlpha, true)) {
                 if (g_activePlayingTrack == -1 && !g_playlist.empty()) {
                     playTrackAndFetchLyrics(displayTrackIdx, audio, discFlightProgress);
                 } else {
@@ -3070,7 +3793,7 @@ int main() {
             bx += mainBtnSz + btnGap;
 
             ImGui::SetCursorPos(ImVec2(bx, row1CenterY - secBtnSz * 0.5f));
-            if (IconButton("##NextBtn", IconType::Next, ImVec2(secBtnSz, secBtnSz), false, accentRGBA, hudAlpha)) {
+            if (IconButton("##NextBtn", IconType::Next, ImVec2(secBtnSz, secBtnSz), false, getUICol(bx + secBtnSz * 0.5f, row1CenterY), hudAlpha)) {
                 const auto& listToUse = g_visibleIndices.empty() ? std::vector<int>{displayTrackIdx} : g_visibleIndices;
                 int nextIdx = getNextTrackIndex(listToUse, true);
                 if (nextIdx >= 0) {
@@ -3082,20 +3805,22 @@ int main() {
 
             LoopMode lm = audio.getLoopMode();
             ImGui::SetCursorPos(ImVec2(bx, row1CenterY - secBtnSz * 0.5f));
-            if (IconButton("##LoopBtn", IconType::Repeat, ImVec2(secBtnSz, secBtnSz), lm != LoopMode::None, accentRGBA, hudAlpha)) {
+            ImVec4 loopCol = getUICol(bx + secBtnSz * 0.5f, row1CenterY);
+            if (IconButton("##LoopBtn", IconType::Repeat, ImVec2(secBtnSz, secBtnSz), lm != LoopMode::None, loopCol, hudAlpha)) {
                 if (lm == LoopMode::All) audio.setLoopMode(LoopMode::Track);
                 else if (lm == LoopMode::Track) audio.setLoopMode(LoopMode::None);
                 else audio.setLoopMode(LoopMode::All);
+                lastActiveTime = now;
             }
             if (lm == LoopMode::Track) {
                 ImVec2 rMin = ImGui::GetItemRectMin();
-                dl->AddText(ImVec2(rMin.x + 12.0f, rMin.y + 7.0f), ImColor(accentRGBA), "1");
+                dl->AddText(ImVec2(rMin.x + 12.0f, rMin.y + 7.0f), ImColor(loopCol), "1");
             }
             bx += secBtnSz + btnGap;
 
             // Кнопка «Оборот бокса / Текст песни (Караоке)» в нижнем баре
             ImGui::SetCursorPos(ImVec2(bx, row1CenterY - secBtnSz * 0.5f));
-            if (IconButton("##LyricsFlipBtn", IconType::Lyrics, ImVec2(secBtnSz, secBtnSz), g_lyricsInspectMode, accentRGBA, hudAlpha)) {
+            if (IconButton("##LyricsFlipBtn", IconType::Lyrics, ImVec2(secBtnSz, secBtnSz), g_lyricsInspectMode, getUICol(bx + secBtnSz * 0.5f, row1CenterY), hudAlpha)) {
                 g_lyricsInspectMode = !g_lyricsInspectMode;
                 g_inspectShowFront = false;
                 if (g_lyricsInspectMode) {
@@ -3108,21 +3833,27 @@ int main() {
             const float barH = 16.0f;
             const float barX = centerAxisX - barW * 0.5f;
 
+            static bool s_isScrubbing = false;
+            static float s_scrubTime = 0.0f;
+
             float curSec = audio.getPlaybackPosition();
             float totSec = audio.getDuration();
-            std::string curTimeStr = formatTime(curSec);
+            if (!s_isScrubbing) {
+                s_scrubTime = curSec;
+            }
+
+            std::string curTimeStr = formatTime(s_isScrubbing ? s_scrubTime : curSec);
             std::string totTimeStr = formatTime(totSec);
 
             ImVec2 curTimeSz = ImGui::CalcTextSize(curTimeStr.c_str());
             ImVec2 totTimeSz = ImGui::CalcTextSize(totTimeStr.c_str());
 
             ImGui::SetCursorPos(ImVec2(barX - curTimeSz.x - 10.0f, row2CenterY - curTimeSz.y * 0.5f));
-            ImGui::TextColored(accentRGBA, "%s", curTimeStr.c_str());
+            ImGui::TextColored(getUICol(barX - curTimeSz.x * 0.5f, row2CenterY), "%s", curTimeStr.c_str());
 
             ImGui::SetCursorPos(ImVec2(barX, row2CenterY - barH * 0.5f));
-            float seekVal = curSec;
-            if (CustomScrubber("##CenteredScrubber", &seekVal, totSec, barW, barH, accentRGBA)) {
-                audio.seekTo((totSec > 0.0f) ? (seekVal / totSec) : 0.0f);
+            if (CustomScrubber("##CenteredScrubber", &s_scrubTime, totSec, barW, barH, getUICol(barX + barW * 0.5f, row2CenterY), true, &s_isScrubbing)) {
+                audio.seekTo((totSec > 0.0f) ? (s_scrubTime / totSec) : 0.0f);
             }
 
             ImGui::SetCursorPos(ImVec2(barX + barW + 10.0f, row2CenterY - totTimeSz.y * 0.5f));
@@ -3131,21 +3862,23 @@ int main() {
             const float rightCenterY = dockH * 0.5f;
             const float volBarW = 86.0f;
             const float volBarH = 16.0f;
-            const float muteBtnSz = 28.0f;
+            const float muteBtnSz = 30.0f;
             const float rightPad = 22.0f;
 
             float volBarX = dockW - rightPad - volBarW;
             float muteBtnX = volBarX - 8.0f - muteBtnSz;
 
+            float curVol = audio.isMuted() ? 0.0f : audio.getVolume();
+            IconType volIcon = (audio.isMuted() || curVol <= 0.001f) ? IconType::Mute : IconType::Volume;
+
             ImGui::SetCursorPos(ImVec2(muteBtnX, rightCenterY - muteBtnSz * 0.5f));
-            IconType volIcon = (audio.isMuted() || audio.getVolume() <= 0.001f) ? IconType::Mute : IconType::Volume;
-            if (IconButton("##MuteBtn", volIcon, ImVec2(muteBtnSz, muteBtnSz), audio.isMuted(), accentRGBA, hudAlpha)) {
+            if (IconButton("##MuteBtn", volIcon, ImVec2(muteBtnSz, muteBtnSz), audio.isMuted(), getUICol(muteBtnX + muteBtnSz * 0.5f, rightCenterY), hudAlpha, false, curVol)) {
                 audio.toggleMute();
             }
 
             ImGui::SetCursorPos(ImVec2(volBarX, rightCenterY - volBarH * 0.5f));
-            float vol = audio.isMuted() ? 0.0f : audio.getVolume();
-            if (CustomScrubber("##VolScrubber", &vol, 1.0f, volBarW, volBarH, accentRGBA)) {
+            float vol = curVol;
+            if (CustomScrubber("##VolScrubber", &vol, 1.0f, volBarW, volBarH, getUICol(volBarX + volBarW * 0.5f, rightCenterY))) {
                 audio.setVolume(vol);
             }
 
@@ -3185,9 +3918,11 @@ int main() {
             ? g_playlist[g_contextMenuTrack].accentColor
             : currentThemeAccent;
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 10.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 12.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 18.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.5f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 7.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
 
         ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.08f, 0.09f, 0.13f, 0.97f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(menuAccent.r, menuAccent.g, menuAccent.b, 0.45f));
@@ -3207,7 +3942,7 @@ int main() {
                     playTrackAndFetchLyrics(g_contextMenuTrack, audio, discFlightProgress);
                     focusTrackOnShelf(g_contextMenuTrack, g_visibleIndices);
                 }
-                if (ImGui::MenuItem("Текст песни (Оборот бокса)")) {
+                if (ImGui::MenuItem("Текст песни")) {
                     if (g_activePlayingTrack != g_contextMenuTrack) {
                         playTrackAndFetchLyrics(g_contextMenuTrack, audio, discFlightProgress);
                     } else {
@@ -3225,55 +3960,6 @@ int main() {
                     g_coverFetcher.requestCover(ct.widePath, ct.artist, ct.title, ct.album, true);
                 }
                 ImGui::Separator();
-            }
-
-            // Доступно всегда (при клике по треку или по пустому месту полки)
-            if (ImGui::MenuItem("Дебаг-монитор (F3)", nullptr, g_showDebugOverlay)) {
-                g_showDebugOverlay = !g_showDebugOverlay;
-                saveSettingsToDisk(audio);
-                lastActiveTime = now;
-            }
-
-            if (ImGui::MenuItem("Отражения под боксами", nullptr, renderer.isReflectionsEnabled())) {
-                bool nextState = !renderer.isReflectionsEnabled();
-                renderer.setReflectionsEnabled(nextState);
-                g_savedReflections = nextState;
-                saveSettingsToDisk(audio);
-                lastActiveTime = now;
-            }
-
-            if (ImGui::MenuItem("Жирный шрифт интерфейса", nullptr, g_boldInterfaceFont)) {
-                g_boldInterfaceFont = !g_boldInterfaceFont;
-                saveSettingsToDisk(audio);
-                lastActiveTime = now;
-            }
-
-            if (ImGui::MenuItem("Горячие клавиши...", nullptr)) {
-                g_showHotkeysDialog = true;
-                lastActiveTime = now;
-            }
-
-            if (ImGui::BeginMenu("Сглаживание")) {
-                AAMode curAA = renderer.getAAMode();
-                if (ImGui::MenuItem("2x MSAA (Аппаратное, чёткое)", nullptr, curAA == AAMode::MSAA)) {
-                    renderer.setAAMode(AAMode::MSAA);
-                    g_savedAAMode = AAMode::MSAA;
-                    saveSettingsToDisk(audio);
-                    lastActiveTime = now;
-                }
-                if (ImGui::MenuItem("FXAA (Быстрое)", nullptr, curAA == AAMode::FXAA)) {
-                    renderer.setAAMode(AAMode::FXAA);
-                    g_savedAAMode = AAMode::FXAA;
-                    saveSettingsToDisk(audio);
-                    lastActiveTime = now;
-                }
-                if (ImGui::MenuItem("Без сглаживания", nullptr, curAA == AAMode::Off)) {
-                    renderer.setAAMode(AAMode::Off);
-                    g_savedAAMode = AAMode::Off;
-                    saveSettingsToDisk(audio);
-                    lastActiveTime = now;
-                }
-                ImGui::EndMenu();
             }
 
             if (ImGui::MenuItem("Сортировать по исполнителю")) {
@@ -3327,7 +4013,7 @@ int main() {
             ImGui::EndPopup();
         }
         ImGui::PopStyleColor(8);
-        ImGui::PopStyleVar(3);
+        ImGui::PopStyleVar(5);
 
         // ------------------ ДИАЛОГ С ГОРАЧИМИ КЛАВИШАМИ ------------------
         if (g_showHotkeysDialog) {
@@ -3597,10 +4283,12 @@ int main() {
         ImGui::PopStyleColor(2);
         ImGui::PopStyleVar(2);
 
-        bool isActivelyAnimating = (now - lastActiveTime < 0.40) ||
-                                   (now - g_lastScrollTime < 0.40) ||
+        bool isActivelyAnimating = (now - lastActiveTime < 0.75) ||
+                                   (now - g_lastScrollTime < 0.75) ||
+                                   renderer.isAccentTransitioning() ||
                                    isScrolling ||
                                    g_roulette.active ||
+                                   (g_settingsAnimProgress > 0.001f && g_settingsAnimProgress < 0.999f) ||
                                    (std::abs(targetInspect - g_inspectProgress) > 0.001f) ||
                                    (std::abs(targetFrontFlip - g_inspectFrontFlip) > 0.001f) ||
                                    (discFlightProgress < 1.0f && g_selectedTrack != -1) ||
@@ -3666,13 +4354,15 @@ int main() {
             g_lastTelemetrySampleTime = now;
         }
 
-        // Адаптивное управление частотой кадров с обязательным усыплением потока:
-        // 1) При активном взаимодействии (скролл, разворот, рулетка) держим плавные 100 FPS (10 мс/кадр).
-        // 2) При открытом окне показа текста (режим Lyrics / Караоке) в покое держим плавные 60 FPS (16.6 мс/кадр)
-        //    для кристальной плавности караоке-анимаций и комфортного чтения.
-        // 3) В стандартном покое на полке (прослушивание трека, статика) усыпляем поток до 30 FPS (33.3 мс/кадр),
-        //    роняя нагрузку до ультра-минимальных 0.1-0.3% CPU и 0.3-0.5% GPU.
-        double targetFps = isActivelyAnimating ? 100.0 : (g_lyricsInspectMode ? 60.0 : 30.0);
+        // Адаптивное управление частотой кадров (высокоточный энергоэффективный пейсинг):
+        // 1) В активном режиме (скролл, анимации, рулетка) ограничиваем кадры ровно 120 FPS
+        //    (при отключённом VSync в драйвере GPU видеокарта не молотит на 1500+ FPS, экономя ресурс и энергию).
+        // 2) В покое (статика, прослушивание музыки) усыпляем поток до 30 FPS (или 60 FPS при открытом тексте/настройках)
+        //    для ультра-низкого потребления 0.1% CPU и 0.5% GPU.
+        double targetFps = isActivelyAnimating
+            ? 120.0
+            : ((g_lyricsInspectMode || g_showSettingsWindow) ? 60.0 : 30.0);
+
         double targetFrameTime = 1.0 / targetFps;
         double elapsed = glfwGetTime() - frameStart;
         if (elapsed < targetFrameTime) {

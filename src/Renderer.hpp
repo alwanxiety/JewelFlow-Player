@@ -57,6 +57,11 @@ public:
     // Возвращает экранные координаты (minX, minY, maxX, maxY) задней крышки развёрнутого 3D-бокса
     glm::vec4 getInspectBoxScreenRect() const;
 
+    // Статус и текущий цвет плавного заполнения фона акцентом
+    bool isAccentTransitioning() const { return m_accentTransitionProg < 1.0f; }
+    glm::vec3 getCurrentAccent() const;
+    glm::vec3 getAccentAtScreenPos(const glm::vec2& screenPos) const;
+
 private:
     AAMode m_aaMode = AAMode::MSAA;
     bool m_reflectionsEnabled = true;
@@ -68,7 +73,20 @@ private:
     GLuint m_copyShader = 0;
 
     GLint m_bgLocAccent = -1;
+    GLint m_bgLocPrevAccent = -1;
+    GLint m_bgLocTransition = -1;
+    GLint m_bgLocOrigin = -1;
+    GLint m_bgLocAspect = -1;
     GLint m_bgLocTime = -1;
+
+    // Плавное заполнение сцены акцентным цветом при переключении треков
+    glm::vec3 m_prevAccent{0.95f, 0.26f, 0.42f};
+    glm::vec3 m_targetAccent{0.95f, 0.26f, 0.42f};
+    float m_accentTransitionProg = 1.0f;
+    glm::vec2 m_accentOrigin{0.5f, 0.45f};
+    int m_lastAccentTrack = -999;
+    float m_lastPulseTime = 0.0f;
+    bool m_firstAccentFrame = true;
 
     GLint m_caseLocModel = -1;
     GLint m_caseLocView = -1;
