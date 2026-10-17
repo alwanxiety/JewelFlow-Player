@@ -262,6 +262,39 @@ struct YandexMusicManager::Impl {
     std::thread statusThread;
 
     void launchBridgeProcess() {
+        std::wstring dirArg = exeDir.wstring();
+
+        // 1. Приоритет №1 (для релизных сборок на GitHub):
+        // Скомпилированный автономный ym_bridge.exe (пользователю не нужен Python вообще!)
+        fs::path bridgeExe = exeDir / "ym_bridge.exe";
+        if (!fs::exists(bridgeExe)) {
+            bridgeExe = fs::current_path() / "ym_bridge.exe";
+        }
+        if (!fs::exists(bridgeExe)) {
+            bridgeExe = fs::current_path() / "dist" / "ym_bridge.exe";
+        }
+
+        if (fs::exists(bridgeExe)) {
+            std::wstring cmdLine = L"\"" + bridgeExe.wstring() + L"\"";
+            std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+            cmdBuf.push_back(L'\0');
+
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+
+            PROCESS_INFORMATION pi{};
+            DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
+            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, flags, nullptr, dirArg.c_str(), &si, &pi)) {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                return;
+            }
+        }
+
+        // 2. Приоритет №2 (для разработчиков, запускающих из исходников):
+        // Исходный скрипт ym_bridge.py через локальный интерпретатор Python
         fs::path scriptPath = exeDir / "ym_bridge.py";
         if (!fs::exists(scriptPath)) {
             scriptPath = fs::current_path() / "ym_bridge.py";
@@ -271,9 +304,8 @@ struct YandexMusicManager::Impl {
         }
 
         std::wstring scriptArg = L"\"" + scriptPath.wstring() + L"\"";
-        std::wstring dirArg = exeDir.wstring();
 
-        // 1. Собираем пути к интерпретаторам Python
+        // Собираем пути к интерпретаторам Python
         std::vector<std::wstring> candidates;
 
         // Поиск в стандартных каталогах установки пользователя (AppData\Local\Programs\Python)
@@ -300,8 +332,7 @@ struct YandexMusicManager::Impl {
         candidates.push_back(L"python.exe");
         candidates.push_back(L"py.exe");
 
-        // Запуск через CreateProcessW с флагами CREATE_NO_WINDOW | DETACHED_PROCESS гарантирует,
-        // что Windows ни при каких обстоятельствах не откроет консольное окно для скрипта!
+        // Запуск через CreateProcessW с флагами CREATE_NO_WINDOW | DETACHED_PROCESS
         for (const auto& launcher : candidates) {
             std::wstring cmdLine = L"\"" + launcher + L"\" " + scriptArg;
             std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());

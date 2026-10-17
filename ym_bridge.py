@@ -395,7 +395,8 @@ class YmBridgeHandler(BaseHTTPRequestHandler):
                     "cover_path": info.get("cover_path", ""),
                     "title": info.get("title", ""),
                     "artist": info.get("artist", ""),
-                    "album": info.get("album", "")
+                    "album": info.get("album", ""),
+                    "duration": info.get("duration", 0)
                 })
             except Exception as e:
                 self.send_json({"status": "error", "message": str(e)}, 500)

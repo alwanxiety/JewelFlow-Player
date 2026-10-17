@@ -2,6 +2,7 @@
 
 cmake-build-*/
 build/
+release/
 
 *.rar
 *.zip
@@ -10,3 +11,4 @@ build/
 
 .DS_Store
 Thumbs.db
+README.md

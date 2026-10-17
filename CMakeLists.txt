@@ -84,7 +84,14 @@ add_executable(JewelPlayer WIN32
         src/YandexMusicManager.cpp
 )
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/ym_bridge.py ${CMAKE_CURRENT_BINARY_DIR}/ym_bridge.py COPYONLY)
+# В Debug копируем ym_bridge.py для удобной отладки в IDE
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR NOT CMAKE_BUILD_TYPE)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/ym_bridge.py ${CMAKE_CURRENT_BINARY_DIR}/ym_bridge.py COPYONLY)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dist/ym_bridge.exe")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/dist/ym_bridge.exe" "${CMAKE_CURRENT_BINARY_DIR}/ym_bridge.exe" COPYONLY)
+endif()
 target_include_directories(JewelPlayer PRIVATE
         src
         ${miniaudio_SOURCE_DIR}
@@ -112,3 +119,22 @@ target_link_libraries(JewelPlayer PRIVATE
 if(MSVC)
     target_link_options(JewelPlayer PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:mainCRTStartup")
 endif()
+
+# В Release-сборке автоматически формируем чистую папку для релиза (без ninja/cmake мусора)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(RELEASE_DIST_DIR "${CMAKE_CURRENT_BINARY_DIR}/publish")
+    set(ROOT_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release")
+
+    add_custom_command(TARGET JewelPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${RELEASE_DIST_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:JewelPlayer>" "${RELEASE_DIST_DIR}/JewelPlayer.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/dist/ym_bridge.exe" "${RELEASE_DIST_DIR}/ym_bridge.exe"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${RELEASE_DIST_DIR}" ${CMAKE_COMMAND} -E tar cf "JewelPlayer_Release.zip" --format=zip "JewelPlayer.exe" "ym_bridge.exe"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ROOT_RELEASE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/JewelPlayer.exe" "${ROOT_RELEASE_DIR}/JewelPlayer.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/ym_bridge.exe" "${ROOT_RELEASE_DIR}/ym_bridge.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RELEASE_DIST_DIR}/JewelPlayer_Release.zip" "${ROOT_RELEASE_DIR}/JewelPlayer_Release.zip"
+        COMMENT "Packaging clean release into ${RELEASE_DIST_DIR} and ${ROOT_RELEASE_DIR} (JewelPlayer.exe, ym_bridge.exe, JewelPlayer_Release.zip)"
+    )
+endif()
+
